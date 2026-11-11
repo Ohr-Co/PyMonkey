@@ -93,6 +93,14 @@ try {
   let panel = await browser.newPage();
   await panel.goto(`chrome-extension://${extensionId}/panel/panel.html`);
 
+  // The line at the top of the panel says what Python is doing. Opening the
+  // panel starts loading it, which takes a few seconds the first time.
+  const status = () => panel.$eval("#status", (el) => ({ state: el.dataset.state, text: el.textContent }));
+  assert.deepEqual(await status(), { state: "loading", text: "Loading Python…" });
+  await panel.waitForFunction(() => document.getElementById("status").dataset.state !== "loading", { timeout: 60_000 });
+  assert.deepEqual(await status(), { state: "ready", text: "Ready" });
+  console.log("ok  panel status: Loading Python… when it opens, then Ready");
+
   // Start a script with the same module the panel uses. The run is left on
   // `window.__run` so a test can interfere while it is in flight.
   const start = (code, options = {}) =>
@@ -420,6 +428,8 @@ try {
     return panel.$eval("#output", (el) => ({ text: el.textContent, isError: el.classList.contains("error") }));
   };
   const visible = (id) => panel.$eval(`#${id}`, (el) => !el.hidden);
+  // The output pane's own state: running, done, stopped or error.
+  const outputState = () => panel.$eval("#output", (el) => el.dataset.state);
 
   //    The panel runs on "the active tab", which in this test is the panel
   //    itself: an extension page, where scripts are not allowed.
@@ -427,6 +437,7 @@ try {
   let shown = await panelOutput();
   assert.match(shown.text, /PyMonkey could not run on this page/);
   assert.equal(shown.isError, true);
+  assert.deepEqual(await status(), { state: "error", text: "Script failed" });
   console.log("ok  panel reports a page it cannot run on");
 
   //    From here on, point it at the test page.
@@ -436,7 +447,18 @@ try {
   }, pageUrl);
   await pressRun(`print("from the panel:", page.title)`);
   assert.deepEqual(await panelOutput(), { text: "from the panel: clicked\n", isError: false });
+  assert.deepEqual(await status(), { state: "ready", text: "Ready" }); // the error above is over
+  assert.equal(await outputState(), "done");
   console.log("ok  panel Run button shows the script's output");
+
+  //    A script that goes wrong: what it printed, then the traceback, marked as an error.
+  await pressRun(`print("before")\n1 / 0`);
+  shown = await panelOutput();
+  assert.match(shown.text, /^before\n[\s\S]*ZeroDivisionError/);
+  assert.equal(shown.isError, true);
+  assert.deepEqual(await status(), { state: "error", text: "Script failed" });
+  assert.equal(await outputState(), "error");
+  console.log("ok  panel shows a failed script as an error, in the output and in the status");
 
   //    page.store from the panel: an unsaved script is told to save first.
   //    Once saved, each press of Run finds what the one before left.
@@ -466,6 +488,8 @@ try {
   await pressRun(`while True: pass`);
   await panel.waitForFunction(() => !document.getElementById("stop").hidden, { timeout: 5_000 });
   assert.equal(await visible("run"), false);
+  assert.deepEqual(await status(), { state: "running", text: "Running…" });
+  assert.equal(await outputState(), "running");
   await new Promise((resolve) => setTimeout(resolve, 1_000)); // let the loop really spin
   const stopClicked = Date.now();
   await panel.click("#stop");
@@ -474,9 +498,13 @@ try {
   assert.deepEqual(shown, { text: "Stopped by user.", isError: true });
   assert.ok(stopTook < 1_000, `Stop took ${stopTook} ms`);
   assert.deepEqual([await visible("run"), await visible("stop")], [true, false]);
+  //    Stopped is a state of its own: the script did not fail, the user ended it.
+  assert.deepEqual(await status(), { state: "stopped", text: "Stopped" });
+  assert.equal(await outputState(), "stopped");
   //    ...and the next run works without reloading anything.
   await pressRun(`print("alive")`);
   assert.deepEqual(await panelOutput(), { text: "alive\n", isError: false });
+  assert.deepEqual(await status(), { state: "ready", text: "Ready" });
   console.log(`ok  Stop button ends a busy script (${stopTook} ms), next run works`);
 
   //    Time limit: the field in the panel decides when a script is cut off.
@@ -485,6 +513,7 @@ try {
   await pressRun(`while True: pass`);
   shown = await panelOutput();
   assert.match(shown.text, /ran longer than 1s/);
+  assert.deepEqual(await status(), { state: "stopped", text: "Stopped" }); // cut off, which is not a failure of the script either
   await panel.$eval("#timeout", (el) => (el.value = "0")); // no limit: a slow script may finish
   await pressRun(`import asyncio\nawait asyncio.sleep(2)\nprint("slow but done")`);
   assert.deepEqual(await panelOutput(), { text: "slow but done\n", isError: false });
@@ -537,8 +566,11 @@ try {
   //     comments have their own color, and all of it can be read (contrast of
   //     4.5 to 1 or better against the background).
   await setEditorText(`def f(x):\n    return "text"  # note\n`);
-  const editorColors = () =>
-    panel.evaluate(() => {
+  //     How parts of the panel look. Each item names an element by its CSS
+  //     selector, and by its text where several match; `part` picks a piece
+  //     of it that is not an element of its own, such as "::placeholder".
+  const looks = (items) =>
+    panel.evaluate((items) => {
       const visible = (color) => color !== "transparent" && !/, 0\)$/.test(color);
       // The color behind an element: its own background, or the nearest one up the tree, or the page's.
       const backgroundOf = (el) => {
@@ -552,20 +584,31 @@ try {
         probe.remove();
         return color;
       };
-      const piece = (selector, text) => {
-        const el = [...document.querySelectorAll(`#code ${selector}`)].find((el) => el.textContent === text);
-        const style = getComputedStyle(el);
-        return { color: style.color, background: backgroundOf(el), weight: Number(style.fontWeight), italic: style.fontStyle === "italic" };
-      };
-      return {
-        plain: piece("span", "x"),
-        keyword: piece("span", "def"),
-        name: piece("span", "f"),
-        string: piece("span", '"text"'),
-        comment: piece("span", "# note"),
-        lineNumber: piece(".cm-gutterElement", "2"),
-      };
-    });
+      return Object.fromEntries(
+        items.map(({ what, selector, text, part }) => {
+          const el = [...document.querySelectorAll(selector)].find((el) => text === undefined || el.textContent === text);
+          const style = getComputedStyle(el, part);
+          const look = {
+            color: style.color,
+            background: backgroundOf(el),
+            border: style.borderTopColor,
+            around: backgroundOf(el.parentElement), // what the border is seen against
+            weight: Number(style.fontWeight),
+            italic: style.fontStyle === "italic",
+          };
+          return [what, look];
+        }),
+      );
+    }, items);
+  const editorColors = () =>
+    looks([
+      { what: "plain", selector: "#code span", text: "x" },
+      { what: "keyword", selector: "#code span", text: "def" },
+      { what: "name", selector: "#code span", text: "f" },
+      { what: "string", selector: "#code span", text: '"text"' },
+      { what: "comment", selector: "#code span", text: "# note" },
+      { what: "lineNumber", selector: "#code .cm-gutterElement", text: "2" },
+    ]);
   const luminance = (color) => {
     const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map((part) => {
       const c = Number(part) / 255;
@@ -726,6 +769,168 @@ try {
   assert.equal((await outputText()).split("\n").length, 1);
   await panel.click("#new");
   console.log("ok  import creates scripts from .py files, with or without a header");
+
+  // 8d. The panel's keys and looks.
+  //     Ctrl+Enter runs and Ctrl+S saves, wherever in the panel the keyboard
+  //     is. (On a Mac the Cmd key is the usual one; the panel takes either.)
+  await panel.evaluate(async (pageUrl) => {
+    const [tab] = await chrome.tabs.query({ url: pageUrl });
+    chrome.tabs.query = async () => [tab]; // "the active tab" is the test page again
+  }, pageUrl);
+  const clearOutput = () => panel.$eval("#output", (el) => (el.textContent = ""));
+  const saveState = () => panel.$eval("#save-state", (el) => el.textContent);
+  assert.equal(await saveState(), ""); // a new script that nobody typed in
+  await setEditorText(`print("by keyboard")`);
+  assert.equal(await saveState(), "Not saved");
+  //     From inside the editor, where Ctrl+Enter would otherwise start a new line.
+  await panel.click("#code .cm-content");
+  await clearOutput();
+  await pressWith("Control", "Enter");
+  assert.deepEqual(await panelOutput(), { text: "by keyboard\n", isError: false });
+  assert.equal(await editorText(), `print("by keyboard")`);
+  //     From a field, with the other key.
+  await panel.type("#name", "Keys");
+  await clearOutput();
+  await pressWith("Meta", "Enter");
+  assert.deepEqual(await panelOutput(), { text: "by keyboard\n", isError: false });
+  await pressWith("Meta", "s");
+  await panel.waitForFunction(() => document.getElementById("script-list").selectedOptions[0].textContent === "Keys", { timeout: 5_000 });
+  assert.equal(await saveState(), "Saved");
+  //     A change made after saving is pointed out, until it is saved too.
+  await panel.click("#code .cm-content");
+  await selectAll();
+  await panel.keyboard.type(`print("saved by keyboard")`);
+  assert.equal(await saveState(), "Unsaved changes");
+  await pressWith("Control", "s");
+  await panel.waitForFunction(() => document.getElementById("save-state").textContent === "Saved", { timeout: 5_000 });
+  assert.equal(await editorText(), `print("saved by keyboard")`); // the keys themselves typed nothing
+  assert.equal((await storedScripts()).find((s) => s.name === "Keys").code, `print("saved by keyboard")`);
+  console.log("ok  keyboard: Ctrl/Cmd+Enter runs and Ctrl/Cmd+S saves, also from inside the editor");
+
+  //     While a script runs, Stop takes the place of Run. A keyboard that was
+  //     on Run is on Stop then, and back on Run when the script has ended.
+  await setEditorText(`while True: pass`);
+  await panel.focus("#run");
+  await panel.keyboard.press("Enter");
+  await panel.waitForFunction(() => document.activeElement.id === "stop", { timeout: 5_000 });
+  await panel.keyboard.press("Enter");
+  await panel.waitForFunction(() => document.activeElement.id === "run", { timeout: 5_000 });
+  assert.deepEqual(await status(), { state: "stopped", text: "Stopped" });
+  console.log("ok  keyboard: the focus goes from Run to Stop and back");
+
+  //     Looks. At 320 px, the narrowest the panel is made for, nothing sticks
+  //     out and the panel does not scroll sideways. (With the longest note on
+  //     whether the script is saved, which shares a line with three buttons.)
+  await panel.setViewport({ width: 320, height: 640 });
+  assert.equal(await saveState(), "Unsaved changes");
+  const misfits = await panel.evaluate(() => {
+    const found = [];
+    if (document.documentElement.scrollWidth > innerWidth) found.push("the panel scrolls sideways");
+    for (const el of document.querySelectorAll("h1, #status, #save-state, button, input, select, label, #code, pre")) {
+      const box = el.getBoundingClientRect();
+      if (box.width === 0) continue; // not shown
+      if (box.left < 0 || box.right > innerWidth) found.push(`${el.id || el.textContent.trim()} sticks out`);
+    }
+    return found;
+  });
+  assert.deepEqual(misfits, []);
+  console.log("ok  looks: everything fits in a panel 320 px wide");
+
+  //     Colors, in light and dark mode. All text can be read (4.5 to 1 against
+  //     what is behind it), the outlines of fields and buttons can be seen
+  //     (3 to 1), and so can the ring around whatever has the keyboard's focus.
+  //     Everything is black, white or gray, except an error.
+  const texts = [
+    { what: "status", selector: "#status" },
+    { what: "output", selector: "#output" },
+    { what: "last run", selector: "#last-run-summary" },
+    { what: "last run output", selector: "#last-run-output" },
+    { what: "last run address", selector: "#last-run-url" },
+    { what: "title", selector: "h1" },
+    { what: "label Name", selector: "label:has(#name)" },
+    { what: "label Run automatically on", selector: "label[for=match]" },
+    { what: "label Enabled", selector: "label:has(#enabled)" },
+    { what: "label Time limit", selector: "label:has(#timeout)" },
+    { what: "list of scripts", selector: "#script-list" },
+    { what: "name", selector: "#name" },
+    { what: "example in an empty Name", selector: "#name", part: "::placeholder" },
+    { what: "example in an empty pattern", selector: "#match", part: "::placeholder" },
+    { what: "time limit", selector: "#timeout" },
+    ...["new", "import", "export", "delete", "run", "stop", "save"].map((id) => ({ what: `button ${id}`, selector: `#${id}` })),
+    { what: "shortcut on Run", selector: "#run kbd" },
+    { what: "shortcut on Save", selector: "#save kbd" },
+    { what: "saved or not", selector: "#save-state" },
+  ];
+  const outlined = ["#script-list", "#new", "#name", "#match", "#timeout", "#code", "#save"];
+  //     The checks in 8 saw real runs put the panel in each of its states.
+  //     Here each state is put on by hand, to look at its colors.
+  const dressAs = (state) =>
+    panel.evaluate((state) => {
+      document.getElementById("status").dataset.state = state;
+      const output = document.getElementById("output");
+      output.textContent = "some output";
+      output.dataset.state = state;
+      output.classList.toggle("error", state === "error" || state === "stopped");
+      document.getElementById("last-run").classList.toggle("error", state === "error");
+    }, state);
+  const isGray = (color) => new Set(color.match(/[\d.]+/g).slice(0, 3)).size === 1;
+  //     Which element shows the focus: the one that has it, or for the editor its frame.
+  const focusRing = () =>
+    panel.evaluate(() => {
+      const el = document.activeElement.closest("#code") ?? document.activeElement;
+      const style = getComputedStyle(el);
+      return { on: el.id, style: style.outlineStyle, width: parseFloat(style.outlineWidth), color: style.outlineColor };
+    });
+  for (const scheme of ["light", "dark"]) {
+    await panel.emulateMediaFeatures([{ name: "prefers-color-scheme", value: scheme }]);
+    for (const state of ["loading", "ready", "running", "stopped", "error"]) {
+      await dressAs(state);
+      const seen = await looks(texts);
+      for (const [what, piece] of Object.entries(seen)) {
+        assert.ok(contrast(piece) >= 4.5, `${scheme} mode, ${state}: ${what} is ${piece.color} on ${piece.background}`);
+      }
+      const colored = Object.keys(seen).filter((what) => !isGray(seen[what].color) || !isGray(seen[what].background));
+      assert.deepEqual(colored, state === "error" ? ["status", "output", "last run", "last run output"] : [], `${scheme} mode, ${state}`);
+    }
+    //   The words in an output pane that has nothing to show yet.
+    await clearOutput();
+    const { hint } = await looks([{ what: "hint", selector: "#output", part: "::before" }]);
+    assert.ok(contrast(hint) >= 4.5, `${scheme} mode: the empty output pane's hint is ${hint.color} on ${hint.background}`);
+    //   An example in an empty field is told apart from text that was typed.
+    const { name, ["example in an empty Name"]: example } = await looks(texts);
+    assert.notEqual(example.color, name.color, scheme);
+
+    for (const [selector, frame] of Object.entries(await looks(outlined.map((selector) => ({ what: selector, selector }))))) {
+      const outline = contrast({ color: frame.border, background: frame.around });
+      assert.ok(outline >= 3, `${scheme} mode: the outline of ${selector} is ${frame.border} on ${frame.around}`);
+    }
+
+    await panel.focus("#name");
+    await pressWith("Shift", "Tab"); // one step back: the button before the Name field
+    let ring = await focusRing();
+    assert.deepEqual({ on: ring.on, style: ring.style }, { on: "delete", style: "solid" });
+    assert.ok(ring.width >= 2 && contrast({ color: ring.color, background: name.around }) >= 3, `${scheme} mode: ring ${ring.color}`);
+    await panel.click("#code .cm-content");
+    ring = await focusRing();
+    assert.deepEqual({ on: ring.on, style: ring.style }, { on: "code", style: "solid" });
+    assert.ok(ring.width >= 2 && contrast({ color: ring.color, background: name.around }) >= 3, `${scheme} mode: ring ${ring.color}`);
+  }
+  await panel.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
+  console.log("ok  looks: readable text, visible outlines and focus ring in light and dark mode; color only for errors");
+
+  //     Every button and field has a name that a screen reader can say: its
+  //     own words, a label, or an aria-label.
+  const nameless = await panel.evaluate(() =>
+    [...document.querySelectorAll("button, select, input:not([type=file]), [role=textbox], [role=region]")]
+      .filter((el) => !(el.labels?.length || el.getAttribute("aria-label") || (el.tagName === "BUTTON" && el.textContent.trim())))
+      .map((el) => el.id || el.className),
+  );
+  assert.deepEqual(nameless, []);
+  console.log("ok  every button and field has a name for screen readers");
+  await panel.setViewport({ width: 800, height: 600 });
+  await panel.reload(); // back to its real state, and drop the chrome.tabs.query stand-in
+  await panelReady();
+  await panel.click("#new");
 
   // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
   //    one after the other. The first is cut off by its own 1-second time limit;

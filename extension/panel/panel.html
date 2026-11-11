@@ -2,13 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>PyMonkey</title>
     <link rel="stylesheet" href="panel.css" />
   </head>
   <body>
     <header>
+      <!-- The PyMonkey mark (logo/pymonkey-mark.svg). Here it is drawn in the
+           panel's own two colors ("ink" and "paper", see panel.css), so that it
+           turns with the rest in dark mode. -->
+      <svg class="mark" viewBox="0 0 128 128" aria-hidden="true">
+        <rect class="ink" width="128" height="128" rx="28" />
+        <g class="paper">
+          <circle cx="25" cy="62" r="16" />
+          <circle cx="103" cy="62" r="16" />
+          <circle cx="64" cy="63" r="37" />
+        </g>
+        <g class="ink">
+          <circle cx="25" cy="62" r="7" />
+          <circle cx="103" cy="62" r="7" />
+          <circle cx="50" cy="56" r="15" />
+          <circle cx="78" cy="56" r="15" />
+          <ellipse cx="64" cy="76" rx="25" ry="18" />
+        </g>
+        <g class="paper">
+          <circle cx="50" cy="57" r="4.5" />
+          <circle cx="78" cy="57" r="4.5" />
+          <rect x="56" y="79" width="16" height="4.5" rx="2.25" />
+        </g>
+      </svg>
       <h1>PyMonkey</h1>
-      <span id="status" class="status">Loading Python…</span>
+      <!-- What Python is doing. data-state is one of: loading, ready, running,
+           stopped, error (panel.js sets it, panel.css draws the dot for it).
+           role="status" makes screen readers say it when it changes. -->
+      <span id="status" class="status" role="status" data-state="loading">Loading Python…</span>
     </header>
 
     <div class="row">
@@ -16,11 +43,13 @@
       <button id="new">New</button>
     </div>
 
-    <!-- Scripts as .py files. The file input is the browser's "choose a file"
-         dialog; it is hidden, and the Import button opens it. -->
-    <div class="row">
-      <button id="import">Import…</button>
-      <button id="export">Export</button>
+    <!-- What can be done with the script as a whole. The file input is the
+         browser's "choose a file" dialog; it is hidden, and Import opens it. -->
+    <div class="row tools">
+      <button id="import" class="quiet">Import…</button>
+      <button id="export" class="quiet">Export</button>
+      <button id="delete" class="quiet">Delete</button>
+      <span id="save-state" class="save-state"></span>
       <input id="import-file" type="file" accept=".py,text/x-python,text/plain" multiple hidden />
     </div>
 
@@ -28,34 +57,39 @@
     <details id="last-run" hidden>
       <summary id="last-run-summary"></summary>
       <p id="last-run-url"></p>
-      <pre id="last-run-output"></pre>
+      <pre id="last-run-output" tabindex="0"></pre>
     </details>
 
     <label>Name <input id="name" type="text" placeholder="My script" /></label>
 
-    <label>
-      Run automatically on
-      <input id="match" type="text" placeholder="https://example.com/*   (blank = manual only)" />
-    </label>
+    <!-- Running automatically: the pages to run on, and a switch for it.
+         (for="match" ties the words to the field, as wrapping it in the label does elsewhere.) -->
+    <div class="field">
+      <div class="row spread">
+        <label for="match">Run automatically on (optional)</label>
+        <label class="inline"><input id="enabled" type="checkbox" checked /> Enabled</label>
+      </div>
+      <input id="match" type="text" placeholder="https://example.com/*" spellcheck="false" />
+    </div>
 
-    <label class="check"><input id="enabled" type="checkbox" checked /> Enabled</label>
-
-    <label>
-      Time limit in seconds (0 = no limit)
+    <label class="inline">
+      Time limit in seconds (0 = none)
       <input id="timeout" type="number" min="0" step="1" value="30" />
     </label>
 
     <!-- The code editor (CodeMirror) is created inside this element: see editor.js. -->
     <div id="code"></div>
 
+    <!-- The <kbd> elements show the keyboard shortcut; panel.js fills them in,
+         because the key is Cmd on a Mac and Ctrl elsewhere. -->
     <div class="row">
-      <button id="run" class="primary">Run on this page</button>
+      <button id="run" class="primary" aria-keyshortcuts="Control+Enter Meta+Enter">Run on this page <kbd aria-hidden="true"></kbd></button>
       <button id="stop" class="primary" hidden>Stop</button>
-      <button id="save">Save</button>
-      <button id="delete">Delete</button>
+      <button id="save" aria-keyshortcuts="Control+S Meta+S">Save <kbd aria-hidden="true"></kbd></button>
     </div>
 
-    <pre id="output" aria-live="polite"></pre>
+    <!-- tabindex="0" lets the keyboard reach the pane, to scroll long output. -->
+    <pre id="output" role="region" aria-label="Output" aria-live="polite" tabindex="0"></pre>
 
     <script type="module" src="panel.js"></script>
   </body>

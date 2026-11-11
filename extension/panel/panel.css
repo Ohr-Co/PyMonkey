@@ -1,106 +1,214 @@
+/* The side panel's looks. Black, white and the grays between them, like the
+   logo, plus one color that is kept for errors.
+
+   Every color is a variable defined here, once for light mode and once for
+   dark, so the rules further down never name a color themselves. The contrast
+   figures are against --paper; text needs 4.5 to 1 to be easy to read, the
+   outline of a field 3 to 1 (tests/e2e.mjs measures both). */
 :root {
-  color-scheme: light dark;
-  --border: color-mix(in srgb, currentColor 22%, transparent);
-  --accent: #2f6fde;
-  --error: #d1433a;
-  /* The code editor's colors. Code is told apart mostly by weight and shade:
-     keywords bold, comments gray, and one color for literal values. */
-  --code-muted: #6a6a6a; /* comments, line numbers */
-  --code-value: #1f5fd1; /* strings, numbers, True/False/None */
-  --code-match: color-mix(in srgb, currentColor 18%, transparent); /* the bracket matching the one at the cursor */
+  color-scheme: light dark; /* lets the browser draw scrollbars, the checkbox and the list to match */
+  --paper: #ffffff; /* the background */
+  --ink: #111111; /* text, the primary button */
+  --muted: #5c5c5c; /* labels, hints, comments in code: 6.7 to 1 */
+  --control: #858585; /* the outline of fields and buttons: 3.7 to 1 */
+  --line: #dcdcdc; /* frames that only decorate */
+  --surface: #f5f5f5; /* the output panes */
+  --hover: #ebebeb;
+  --selection: #d0d0d0;
+  --error: #b3261e; /* the one color: 6.5 to 1 */
+  --code-value: #4a4a4a; /* strings, numbers, True/False/None: a shade lighter than code */
 }
 
-/* The same in dark mode (when the browser or system is set to dark). */
 @media (prefers-color-scheme: dark) {
   :root {
-    --code-muted: #9a9a9a;
-    --code-value: #8ab4ff;
+    --paper: #121212;
+    --ink: #f2f2f2;
+    --muted: #a6a6a6;
+    --control: #7a7a7a;
+    --line: #343434;
+    --surface: #1c1c1c;
+    --hover: #2b2b2b;
+    --selection: #474747;
+    --error: #ff8a80;
+    --code-value: #bdbdbd;
   }
 }
 
 * { box-sizing: border-box; }
 
+/* A column: each part of the panel is a row in it, the editor and the output
+   pane share the height that is left. In a short panel the page scrolls. */
 body {
   margin: 0;
-  padding: 12px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  height: 100vh;
+  gap: 12px;
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
   font: 13px/1.4 system-ui, sans-serif;
 }
 
-header { display: flex; align-items: baseline; justify-content: space-between; }
-h1 { margin: 0; font-size: 16px; }
-.status { font-size: 12px; opacity: 0.7; }
-.status.ready { color: #2a9d5c; opacity: 1; }
-.status.error { color: var(--error); opacity: 1; }
+[hidden] { display: none !important; }
+::selection { background: var(--selection); color: inherit; }
 
-.row { display: flex; gap: 8px; }
-.row select { flex: 1; min-width: 0; }
+/* Where the keyboard is: the same ring on everything. (:focus-visible is
+   focus that came from the keyboard, not from a click on a button.) */
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
 
-label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
-label.check { flex-direction: row; align-items: center; gap: 6px; }
+/* ---------- header ---------- */
+
+header { display: flex; align-items: center; gap: 8px; }
+.mark { flex: none; width: 22px; height: 22px; }
+.mark .ink { fill: var(--ink); }
+.mark .paper { fill: var(--paper); }
+h1 { margin: 0; font-size: 15px; font-weight: 600; }
+
+/* The status: a dot and a few words, at the right. The dot's shape says the
+   same as the words, so the state does not hang on color alone. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.status::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+}
+.status[data-state="loading"]::before { animation: pulse 0.8s ease-in-out infinite alternate; } /* a ring, fading in and out */
+.status[data-state="ready"]::before { background: currentColor; } /* a dot */
+.status[data-state="running"] { color: var(--ink); }
+.status[data-state="running"]::before { background: currentColor; animation: pulse 0.8s ease-in-out infinite alternate; }
+.status[data-state="stopped"]::before { background: currentColor; border-radius: 1px; } /* a square, as on a stop button */
+.status[data-state="error"] { color: var(--error); }
+.status[data-state="error"]::before { background: currentColor; }
+@keyframes pulse { to { opacity: 0.25; } }
+/* For people who have asked their system for less movement. */
+@media (prefers-reduced-motion: reduce) {
+  .status::before { animation: none !important; }
+}
+
+/* ---------- fields and buttons ---------- */
+
+.row { display: flex; align-items: center; gap: 8px; }
+.row select { flex: 1; min-width: 0; } /* the list takes the room the button leaves */
+
+label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+/* A label with its field on the same line. */
+label.inline { flex-direction: row; align-items: center; gap: 6px; }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.spread { justify-content: space-between; }
 
 input[type="text"], input[type="number"], select, button {
   font: inherit;
-  padding: 6px 8px;
-  border: 1px solid var(--border);
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--control);
   border-radius: 6px;
-  background: transparent;
-  color: inherit;
+  background: var(--paper);
+  color: var(--ink);
 }
+input::placeholder { color: var(--muted); opacity: 1; }
+input[type="checkbox"] { margin: 0; width: 14px; height: 14px; accent-color: var(--ink); }
+#timeout { width: 68px; }
 
-button { cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: white; flex: 1; }
-button#stop { background: var(--error); border-color: var(--error); }
-[hidden] { display: none; }
+button { cursor: pointer; white-space: nowrap; }
+button:hover { background: var(--hover); }
 button:disabled { opacity: 0.5; cursor: default; }
 
-pre, #code .cm-scroller { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+/* The main action: the logo's black on white, turned around. */
+button.primary {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+  font-weight: 600;
+}
+button.primary:hover { opacity: 0.85; }
+
+/* Lesser actions: words only. The negative margin lines the first one's text
+   up with the fields above and below. */
+button.quiet { padding: 3px 6px; border-color: transparent; color: var(--muted); font-size: 12px; }
+button.quiet:hover { color: var(--ink); }
+.tools { gap: 2px; margin: -4px 0 -4px -6px; }
+.save-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+/* The keyboard shortcut on a button. Left out when the panel is narrow; the
+   button's tooltip has it too. */
+kbd { font: inherit; font-size: 11px; font-weight: 400; }
+@media (max-width: 380px) {
+  kbd { display: none; }
+}
 
 /* ---------- the code editor ----------
    CodeMirror (see editor.js) builds the editor inside #code and names its
    parts .cm-something. It brings its own colors, made for a white page;
    the rules below replace them with ones that follow light and dark mode. */
+pre, #code .cm-scroller { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+
 #code {
-  flex: 2;
-  min-height: 160px;
+  flex: 2 1 180px; /* twice the output pane's share of the spare height */
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
   overflow: hidden; /* the editor scrolls inside, the frame stays put */
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 6px;
 }
-#code:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
-#code .cm-editor { height: 100%; }
+#code:focus-within { outline: 2px solid var(--ink); outline-offset: 2px; }
+#code .cm-editor { flex: 1; min-height: 0; }
 #code .cm-editor.cm-focused { outline: none; } /* the frame shows the focus instead */
-#code .cm-content { caret-color: currentColor; }
+#code .cm-content { caret-color: var(--ink); }
 /* The line numbers stay put while long lines scroll sideways beneath them,
-   so they need a background that is not see-through. Canvas is the page's own. */
-#code .cm-gutters { background: Canvas; border: none; color: var(--code-muted); }
-#code .cm-matchingBracket { background: var(--code-match); }
+   so they need a background that is not see-through. */
+#code .cm-gutters { background: var(--paper); border: none; color: var(--muted); }
+#code .cm-matchingBracket { background: var(--selection); }
 
-/* Syntax highlighting: the editor gives each piece of code a class by its role. */
+/* Syntax highlighting: the editor gives each piece of code a class by its
+   role. Roles are told apart by weight, shade and slant instead of color. */
 #code .tok-keyword { font-weight: 600; }
 #code .tok-definition, #code .tok-className { font-weight: 600; } /* the name in `def name(...)` and `class Name:` */
-#code .tok-comment { color: var(--code-muted); font-style: italic; }
+#code .tok-comment { color: var(--muted); font-style: italic; }
 #code .tok-string, #code .tok-string2, #code .tok-number, #code .tok-bool, #code .tok-atom { color: var(--code-value); }
-#code .tok-meta { color: var(--code-muted); } /* decorators */
+#code .tok-meta { color: var(--muted); } /* decorators */
+
+/* ---------- output ---------- */
 
 pre {
-  flex: 1;
-  min-height: 80px;
+  flex: 1 1 88px;
+  min-height: 88px;
   margin: 0;
-  padding: 8px;
+  padding: 8px 10px;
   overflow: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 6px;
+  background: var(--surface);
   white-space: pre-wrap;
   word-break: break-word;
 }
-pre.error { color: var(--error); }
+#output:empty::before { content: "Output appears here."; color: var(--muted); }
+#output[data-state="running"] { color: var(--muted); }
+/* A failed run: the one place with color, and a bar at the left for those who do not see it. */
+pre.error { color: var(--error); border-left: 3px solid var(--error); }
+/* A stopped run did not go wrong. */
+#output[data-state="stopped"] { color: var(--ink); border-left-color: var(--control); }
 
-details { font-size: 12px; }
-details summary { cursor: pointer; }
-details.error summary, details.error pre { color: var(--error); }
-details p { margin: 6px 0; opacity: 0.7; word-break: break-all; }
-details pre { min-height: 0; max-height: 160px; }
+/* The last automatic run: one line that unfolds. */
+details { font-size: 12px; color: var(--muted); }
+details summary { cursor: pointer; border-radius: 4px; }
+details.error summary { color: var(--error); }
+details p { margin: 6px 0; word-break: break-all; }
+details pre { flex: none; min-height: 0; max-height: 160px; color: var(--ink); }
+details.error pre { color: var(--error); }

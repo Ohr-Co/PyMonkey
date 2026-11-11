@@ -11,6 +11,7 @@
 //   * announce each result to the background, and keep it for anyone who asks later
 
 import { createRunQueue } from "../lib/run-queue.js";
+import { STOPPED_BY_USER, overTimeLimit } from "../lib/run-state.js";
 import { timeoutSeconds } from "../lib/timeout.js";
 
 const SNAPSHOT_TIMEOUT_MS = 15_000;
@@ -63,9 +64,8 @@ function killRun(reason) {
 
 // The user pressed Stop.
 function stopRun(runId) {
-  const reason = "Stopped by user.";
-  if (runs.isActive(runId)) killRun(reason);
-  else runs.cancel(runId, { ok: false, stdout: "", error: reason }); // not started yet: just drop it
+  if (runs.isActive(runId)) killRun(STOPPED_BY_USER);
+  else runs.cancel(runId, { ok: false, stdout: "", error: STOPPED_BY_USER }); // not started yet: just drop it
 }
 
 function warm() {
@@ -83,10 +83,7 @@ function onWorkerMessage(data) {
     // (activeTimeout is 0 when the script has no time limit.)
     if (runs.isActive(data.id) && activeTimeout > 0) {
       const limit = activeTimeout;
-      runTimer = setTimeout(
-        () => killRun(`Script stopped: it ran longer than ${limit}s. Its time limit can be changed in the panel.`),
-        limit * 1000,
-      );
+      runTimer = setTimeout(() => killRun(overTimeLimit(limit)), limit * 1000);
     }
   } else if (data.type === "result") {
     if (warmPending.has(data.id)) {
