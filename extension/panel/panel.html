@@ -16,6 +16,14 @@
       <button id="new">New</button>
     </div>
 
+    <!-- Scripts as .py files. The file input is the browser's "choose a file"
+         dialog; it is hidden, and the Import button opens it. -->
+    <div class="row">
+      <button id="import">Import…</button>
+      <button id="export">Export</button>
+      <input id="import-file" type="file" accept=".py,text/x-python,text/plain" multiple hidden />
+    </div>
+
     <!-- The selected script's last automatic run. Hidden until it has one. -->
     <details id="last-run" hidden>
       <summary id="last-run-summary"></summary>

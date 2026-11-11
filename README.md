@@ -128,6 +128,37 @@ Automatic runs happen whether or not the panel is open. PyMonkey keeps each scri
 
 Scripts can import the Python standard library, BeautifulSoup and a few more packages, and you can add others: see [Packages](#packages).
 
+## Script files
+
+Scripts live in the browser's storage. To back one up, keep it in git or pass it on, press **Export** in the panel: it saves the script you are looking at as a `.py` file. **Import…** does the reverse, for one file or several at once.
+
+An exported file is the script's code under a header comment:
+
+```python
+# ==PyMonkey==
+# @name     Price watcher
+# @match    https://example.com/shop/*
+# @timeout  120
+# ==/PyMonkey==
+
+for row in page.select("tr.item"):
+    print(row["data-price"])
+```
+
+| Header line | Meaning | If left out |
+|---|---|---|
+| `# @name` | The script's name | The file's name without `.py` |
+| `# @match` | The URL pattern the script runs on automatically | Blank: the script runs only when you press Run |
+| `# @timeout` | The time limit in seconds, 0 for none | 30 |
+
+The rules, for writing a header by hand:
+
+- The header is the first thing in the file, starts with the line `# ==PyMonkey==` and ends with `# ==/PyMonkey==`. Every line in between is a comment. Lines other than the three above are ignored.
+- Everything below the header is the script. To Python the header is only comments, so the file stays an ordinary Python file.
+- A `.py` file without a header can be imported as well. It becomes a script named after the file that runs only when you press Run.
+
+Importing always adds a script; it never replaces one you have, even one with the same name. Whether a script is enabled is not part of the file: **an imported script with a match pattern arrives switched off**, and starts running on its own only after you tick **Enabled** and save. That leaves time to read it first, which matters with a script somebody else wrote: a script can read the pages it runs on, sites you are logged in to included, and send what it finds elsewhere (see [Requests and security](#writing-scripts)).
+
 ## Packages
 
 Besides the Python standard library, PyMonkey comes with:
@@ -221,7 +252,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files
   vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
 scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
