@@ -1,0 +1,7 @@
+node_modules/
+# Pyodide runtime + wheels, copied in by `npm run setup`
+extension/vendor/
+__pycache__/
+.pytest_cache/
+*.zip
+.DS_Store

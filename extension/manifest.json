@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "PyMonkey",
+  "version": "0.1.0",
+  "description": "Run Python alongside any web page: scrape data, edit what you see, automate the page.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "offscreen", "sidePanel", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Open PyMonkey"
+  },
+  "side_panel": {
+    "default_path": "panel/panel.html"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

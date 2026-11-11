@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PyMonkey</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header>
+      <h1>PyMonkey</h1>
+      <span id="status" class="status">Loading Python…</span>
+    </header>
+
+    <div class="row">
+      <select id="script-list" aria-label="Saved scripts"></select>
+      <button id="new">New</button>
+    </div>
+
+    <label>Name <input id="name" type="text" placeholder="My script" /></label>
+
+    <label>
+      Run automatically on
+      <input id="match" type="text" placeholder="https://example.com/*   (blank = manual only)" />
+    </label>
+
+    <label class="check"><input id="enabled" type="checkbox" checked /> Enabled</label>
+
+    <textarea id="code" spellcheck="false" aria-label="Python code"></textarea>
+
+    <div class="row">
+      <button id="run" class="primary">Run on this page</button>
+      <button id="save">Save</button>
+      <button id="delete">Delete</button>
+    </div>
+
+    <pre id="output" aria-live="polite"></pre>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

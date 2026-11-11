@@ -1,0 +1,17 @@
+{
+  "name": "pymonkey",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A browser extension that runs your Python scripts on the pages you visit.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "test": "node --test tests/*.test.mjs && python3 -m pytest -q tests/",
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.17.0",
+    "pyodide": "314.0.7"
+  }
+}
