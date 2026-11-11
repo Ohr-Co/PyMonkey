@@ -31,6 +31,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import puppeteer from "puppeteer-core";
+import { copyExtension } from "../tests/extension-copy.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values: options } = parseArgs({
@@ -119,7 +120,7 @@ async function measureRound() {
   const browser = await puppeteer.launch({
     executablePath: chromePath,
     headless: true,
-    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
+    args: [`--disable-extensions-except=${loaded.path}`, `--load-extension=${loaded.path}`, "--no-sandbox"],
   });
   const stages = [];
   const record = (name) => {
@@ -218,11 +219,16 @@ if (!existsSync(join(extensionPath, "vendor", "pyodide", "pyodide.asm.wasm"))) {
   process.exit(1);
 }
 
+// The browser loads a copy of the extension that has been allowed on this
+// machine's own pages, which is where the measuring happens. As installed,
+// PyMonkey is allowed nowhere until the user says so (see tests/extension-copy.mjs).
+const loaded = copyExtension(extensionPath);
 const all = [];
 try {
   for (let round = 0; round < rounds; round++) all.push(await measureRound());
 } finally {
   server.close();
+  loaded.remove();
 }
 process.stderr.write("\n");
 

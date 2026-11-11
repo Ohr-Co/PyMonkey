@@ -152,6 +152,23 @@ kbd { font: inherit; font-size: 11px; font-weight: 400; }
   kbd { display: none; }
 }
 
+/* ---------- notices about site access ----------
+   A line of words, with a button when there is something the user can do
+   about it right here. Not an error, so not in the error color. */
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--control);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.notice span { flex: 1; min-width: 0; word-break: break-word; } /* an address is one long word */
+.notice button { padding: 3px 8px; font-size: 12px; }
+
 /* ---------- the code editor ----------
    CodeMirror (see editor.js) builds the editor inside #code and names its
    parts .cm-something. It brings its own colors, made for a white page;

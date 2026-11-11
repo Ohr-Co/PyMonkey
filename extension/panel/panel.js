@@ -7,6 +7,7 @@ import { MAX_FILE_BYTES, fileNameFor, formatScriptFile, importedScript, importNo
 import { startRun } from "../lib/run-client.js";
 import { runState } from "../lib/run-state.js";
 import { describeLastRun, isLastRunKey } from "../lib/last-run.js";
+import { describeSites, failedFetchUrl, hasAccess, pageAccess, siteOf, sitesNeeded, sitesWithoutAccess } from "../lib/site-access.js";
 import { getScripts, getLastRuns, saveScript, deleteScript, markLastRunSeen } from "../lib/storage.js";
 import { timeoutSeconds } from "../lib/timeout.js";
 
@@ -18,6 +19,7 @@ const els = {
   importBtn: $("import"), importFile: $("import-file"), exportBtn: $("export"), saveState: $("save-state"),
   lastRun: $("last-run"), lastRunSummary: $("last-run-summary"),
   lastRunUrl: $("last-run-url"), lastRunOutput: $("last-run-output"),
+  matchAccess: $("match-access"), tabAccess: $("tab-access"), fetchAccess: $("fetch-access"),
 };
 
 const STARTER = `# \`page\` is the page you are looking at.
@@ -52,7 +54,98 @@ function showOutput(result) {
   els.output.textContent = text || "(no output)";
   els.output.classList.toggle("error", !result.ok);
   els.output.dataset.state = runState(result); // done, stopped or error
+  showFetchAccess(result);
 }
+
+// ---------- site access ----------
+//
+// PyMonkey may only touch sites the user has allowed (see lib/site-access.js).
+// Three lines in the panel say when that is in the way, and what to do:
+//   under the URL pattern   the script cannot run automatically: its site is not allowed
+//   under the Run button    the page in this tab is not allowed
+//   under that              the last run asked for an address on a site that is not allowed
+
+let sitesToAllow = []; // the sites the script in the fields needs and does not have
+let fetchSite = null; // the site the last run could not fetch from, if PyMonkey is not allowed on it
+
+// Show a notice with these words, or hide it if there are none.
+function showNotice(el, text) {
+  el.hidden = !text;
+  el.querySelector("span").textContent = text ?? "";
+}
+
+// Ask Chrome to allow PyMonkey on these sites for good. Chrome puts the
+// question to the user, and only in answer to a click or a key press, so this
+// must be called first thing in the handler of one. For sites that are
+// allowed already nothing is shown. Resolves to true if all are allowed now.
+function askFor(sites) {
+  if (sites.length === 0) return Promise.resolve(true);
+  return chrome.permissions.request({ origins: sites }).catch((err) => {
+    // Chrome refused to even ask, e.g. for a site it gives to no extension.
+    showOutput({ ok: false, stdout: "", error: `Chrome cannot give access to ${describeSites(sites)}: ${err.message}` });
+    return false;
+  });
+}
+
+async function showMatchAccess() {
+  const sites = sitesNeeded(readForm());
+  const lacking = await sitesWithoutAccess(sites);
+  if (String(sites) !== String(sitesNeeded(readForm()))) return; // the fields changed while we were asking
+  sitesToAllow = lacking;
+  showNotice(
+    els.matchAccess,
+    lacking.length ? `No access to ${describeSites(lacking)} yet, so this script will not run there by itself.` : null,
+  );
+}
+
+const TAB_NOTICES = {
+  "no-access": "PyMonkey has not been allowed on the page in this tab. Click the PyMonkey icon in the toolbar to allow it.",
+  unsupported: "Scripts cannot run on the kind of page that is in this tab.",
+};
+
+async function showTabAccess() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  showNotice(els.tabAccess, TAB_NOTICES[pageAccess(tab)] ?? null);
+}
+
+// With a result: look whether the run failed on an address it could not
+// fetch. Without: look again at the one found last time.
+async function showFetchAccess(result) {
+  if (result) {
+    const url = result.ok ? null : failedFetchUrl(result.error);
+    fetchSite = url ? siteOf(url) : null;
+  }
+  const site = fetchSite;
+  const allowed = site ? await hasAccess(site) : true;
+  if (site !== fetchSite) return; // another run ended while we were asking
+  if (allowed) fetchSite = null;
+  showNotice(
+    els.fetchAccess,
+    fetchSite ? `The script asked for an address on ${fetchSite}, where PyMonkey has not been allowed. Allow it, then run again.` : null,
+  );
+}
+
+// Something about access changed (or may have): look at everything again.
+function refreshAccess() {
+  showMatchAccess();
+  showTabAccess();
+  showFetchAccess();
+  refreshList();
+}
+
+els.matchAccess.querySelector("button").addEventListener("click", () => askFor(sitesToAllow).then(refreshAccess));
+els.fetchAccess.querySelector("button").addEventListener("click", () => askFor([fetchSite]).then(refreshAccess));
+
+// The user allowed a site or took one away, here or in Chrome's settings.
+chrome.permissions.onAdded.addListener(refreshAccess);
+chrome.permissions.onRemoved.addListener(refreshAccess);
+// Another tab came to the front, or the page in a tab changed.
+chrome.tabs.onActivated.addListener(showTabAccess);
+chrome.tabs.onUpdated.addListener(showTabAccess);
+// The toolbar icon was clicked while the panel was open: that tab is allowed now (see background.js).
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.target === "panel" && msg.type === "tab-allowed") showTabAccess();
+});
 
 // The state of the panel's fields: the script as it is being edited.
 function readForm() {
@@ -98,6 +191,7 @@ function loadIntoEditor(script) {
   editor.setText(script?.code ?? STARTER);
   rememberDraft();
   showLastRun();
+  showMatchAccess();
 }
 
 // Show the last automatic run of the script being edited, if it has one.
@@ -124,8 +218,12 @@ async function refreshList(selectId = currentId) {
   const scripts = await getScripts();
   const lastRuns = await getLastRuns();
   savedScripts = scripts;
-  // A script whose last automatic run failed is marked in the list.
-  const label = (s) => (s.name || "Untitled") + (lastRuns[s.id]?.ok === false ? " (failed)" : "");
+  // Marked in the list: a script whose last automatic run failed, and one
+  // that cannot run automatically because its site is not allowed.
+  const lacking = await Promise.all(scripts.map((s) => sitesWithoutAccess(sitesNeeded(s))));
+  const noAccess = new Set(scripts.filter((_, i) => lacking[i].length > 0).map((s) => s.id));
+  const label = (s) =>
+    (s.name || "Untitled") + (lastRuns[s.id]?.ok === false ? " (failed)" : "") + (noAccess.has(s.id) ? " (no access)" : "");
   els.list.replaceChildren(
     new Option("(unsaved script)", ""),
     ...scripts.map((s) => new Option(label(s), s.id)),
@@ -176,14 +274,22 @@ async function run() {
   else setStatus("error", "Script failed");
   if (els.run.hidden) swapRunButton(false);
   running = false;
+  showTabAccess(); // if the run failed for want of access, say so where it stays in view
 }
 
 async function save() {
-  const saved = await saveScript({ id: currentId ?? undefined, ...scriptFields(readForm()) });
+  const form = readForm();
+  // A script that is to run automatically needs its site allowed. Chrome asks
+  // the user now, unless the site is allowed already (see askFor: it has to be
+  // the first thing done). The script is saved whatever the answer, and
+  // without waiting for it.
+  const asked = askFor(sitesNeeded(form));
+  const saved = await saveScript({ id: currentId ?? undefined, ...scriptFields(form) });
   currentId = saved.id;
   await refreshList();
   rememberDraft(); // the draft now belongs to a saved script, and has no changes
   await showLastRun();
+  asked.then(refreshAccess);
 }
 
 els.run.addEventListener("click", run);
@@ -278,6 +384,7 @@ els.importFile.addEventListener("change", async () => {
 
 // Typing in any field changes the draft. (The editor reports its own changes: see createEditor above.)
 for (const field of [els.name, els.match, els.enabled, els.timeout]) field.addEventListener("input", rememberDraft);
+for (const field of [els.match, els.enabled]) field.addEventListener("input", showMatchAccess);
 
 // Results of scripts that auto-ran while the panel is open.
 // (Runs started with the Run button are handled by startRun above.)
@@ -301,6 +408,8 @@ refreshList(null).then((scripts) => {
   loadIntoEditor(formToRestore(loadDraft(), scripts));
   els.list.value = currentId ?? "";
 });
+
+showTabAccess();
 
 // Warm start: begin loading Python as soon as the panel opens, so the cost is
 // already paid by the time the user clicks Run.

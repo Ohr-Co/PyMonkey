@@ -70,6 +70,10 @@
         <label class="inline"><input id="enabled" type="checkbox" checked /> Enabled</label>
       </div>
       <input id="match" type="text" placeholder="https://example.com/*" spellcheck="false" />
+      <!-- Site access (see lib/site-access.js). This line shows when the script
+           is to run automatically on a site PyMonkey has not been allowed on.
+           Its button makes Chrome ask the user. -->
+      <p id="match-access" class="notice" role="status" hidden><span></span><button>Allow</button></p>
     </div>
 
     <label class="inline">
@@ -87,6 +91,12 @@
       <button id="stop" class="primary" hidden>Stop</button>
       <button id="save" aria-keyshortcuts="Control+S Meta+S">Save <kbd aria-hidden="true"></kbd></button>
     </div>
+
+    <!-- Two more lines about site access: the page in this tab is not one
+         PyMonkey may run on, and the last run asked for an address on a site
+         that was not allowed. -->
+    <p id="tab-access" class="notice" role="status" hidden><span></span></p>
+    <p id="fetch-access" class="notice" role="status" hidden><span></span><button>Allow</button></p>
 
     <!-- tabindex="0" lets the keyboard reach the pane, to scroll long output. -->
     <pre id="output" role="region" aria-label="Output" aria-live="polite" tabindex="0"></pre>

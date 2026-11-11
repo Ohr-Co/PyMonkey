@@ -9,12 +9,44 @@
 
 import { countUnseenFailures, isLastRunKey, makeLastRun } from "./lib/last-run.js";
 import { urlMatches } from "./lib/match.js";
+import { NO_ACCESS_REASONS, hasAccess, pageAccess, siteOf } from "./lib/site-access.js";
 import { getLastRuns, getScripts, saveLastRun, scriptStoreCall } from "./lib/storage.js";
 
 const OFFSCREEN_URL = "offscreen/offscreen.html";
 
-// Clicking the toolbar icon opens the editor side panel.
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(console.error);
+// ---------- the toolbar icon, and where PyMonkey may run ----------
+//
+// PyMonkey is installed with access to no site (see lib/site-access.js).
+// Clicking the toolbar icon does two things: it opens the editor side panel,
+// and it makes Chrome allow PyMonkey on the page in that tab ("activeTab" in
+// the manifest), which is what lets "Run on this page" work there.
+//
+// Chrome can open the panel on a click by itself (openPanelOnActionClick), but
+// a click it handles that way does not allow the tab. A click handled here does.
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(console.error);
+
+chrome.action.onClicked.addListener((tab) => {
+  // This must be the first thing that happens, with nothing awaited before
+  // it: Chrome opens a panel only in direct answer to a click.
+  chrome.sidePanel.open({ windowId: tab.windowId }).catch(console.error);
+  // If the panel was open already, it needs telling that this tab is allowed now.
+  chrome.runtime.sendMessage({ target: "panel", type: "tab-allowed", tabId: tab.id }).catch(() => {}); // not open yet: fine
+});
+
+// The content script is not listed in the manifest, because that would take
+// access to every site at install time. It is registered here instead, for
+// every site, and Chrome puts it only into pages of sites the user has allowed
+// for good. When a site is allowed or taken away, Chrome follows by itself.
+// Chrome remembers the registration until the extension is updated.
+const CONTENT_SCRIPT = { id: "content", js: ["content.js"], matches: ["<all_urls>"], runAt: "document_idle" };
+
+async function registerContentScript() {
+  const registered = await chrome.scripting.getRegisteredContentScripts({ ids: [CONTENT_SCRIPT.id] });
+  if (registered.length === 0) await chrome.scripting.registerContentScripts([CONTENT_SCRIPT]);
+}
+// onInstalled also fires after an update, and when the extension is reloaded at chrome://extensions.
+chrome.runtime.onInstalled.addListener(() => registerContentScript().catch(console.error));
+chrome.runtime.onStartup.addListener(() => registerContentScript().catch(console.error));
 
 // ---------- offscreen document (where Python runs) ----------
 
@@ -70,8 +102,13 @@ async function sendToTab(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, payload);
   } catch {
-    // No content script there yet (tab was open before PyMonkey was installed
-    // or reloaded). Inject it and try once more.
+    // No content script there. That is the normal case for "Run on this page":
+    // the site is not one the user allowed for good, only this tab is, by a
+    // click on the toolbar icon. (It also happens on an allowed site, in a tab
+    // that was open before PyMonkey was installed.) Put the script in and try
+    // once more, or say why that cannot be done.
+    const access = pageAccess(await chrome.tabs.get(tabId).catch(() => undefined));
+    if (access !== "ok") throw new Error(NO_ACCESS_REASONS[access]);
     await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
     return chrome.tabs.sendMessage(tabId, payload);
   }
@@ -123,6 +160,13 @@ async function runFinished({ runId, meta, result }) {
 }
 
 async function autoRun(tabId, url) {
+  // Scripts start by themselves only on sites the user has allowed for good.
+  // Chrome does not load content.js anywhere else, so "page-ready" normally
+  // comes from such a site. The exception is a page where a script was just
+  // run by hand, in a tab allowed by the toolbar icon (see sendToTab above):
+  // being allowed to run one script there once is not being allowed to start others.
+  const site = siteOf(url);
+  if (!site || !(await hasAccess(site))) return;
   const scripts = await getScripts();
   for (const script of scripts) {
     if (!script.enabled || !script.match || !urlMatches(script.match, url)) continue;

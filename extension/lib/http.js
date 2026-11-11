@@ -1,9 +1,12 @@
 // `page.fetch`: one HTTP request for a script.
 //
 // The request is made by the Pyodide worker itself (see pyodide-worker.js).
-// A worker of an extension page may call any site the extension has host
-// permission for, and the site's CORS rules do not apply to it. That is what
-// lets a script read a page or an API on another site.
+// A worker of an extension page may call any site the user has allowed
+// PyMonkey on (see lib/site-access.js), and the site's CORS rules do not apply
+// to it. That is what lets a script read a page or an API on another site.
+// On a site that was not allowed the request is held to the CORS rules like
+// one from a web page: it works if the site lets anyone read it, as many
+// public APIs do, and fails otherwise.
 //
 // Bodies travel as base64 text in both directions, because the bridge between
 // JavaScript and Python carries JSON and a body may be binary (an image, a zip).
@@ -64,7 +67,9 @@ export async function httpFetch({ url, method, headers, body, timeout, cookies }
     // to fetch". Say what that usually means. Other messages speak for
     // themselves (e.g. a header name that is not allowed).
     const message = err?.message ?? String(err);
-    const hint = "the server cannot be reached, the address is wrong, or the connection was lost";
+    const hint =
+      "the server cannot be reached, the address is wrong, the connection was lost, " +
+      "or PyMonkey has not been allowed on that site";
     return { ok: false, timeout: false, error: message === "Failed to fetch" ? hint : message };
   }
 }

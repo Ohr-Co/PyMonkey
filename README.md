@@ -36,9 +36,23 @@ Then in Chrome:
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. Click **Load unpacked** and pick the `extension` folder.
-3. Open any web page, click the PyMonkey toolbar icon, and press **Run on this page**.
+3. Open any web page, click the PyMonkey toolbar icon, and press **Run on this page**. The click on the icon is also what allows PyMonkey on that page: see [Site access](#site-access).
 
 After changing extension code, press the reload icon on the PyMonkey card in `chrome://extensions`.
+
+## Site access
+
+PyMonkey is installed with access to no site. Chrome shows no warning about your data when you add it, and until you say so PyMonkey cannot read or change any page. There are two ways to say so:
+
+- **For one tab: click the PyMonkey icon in the toolbar.** This opens the panel and allows PyMonkey on the page in that tab, so **Run** works there. It lasts while the tab stays on that site; following links within the site is fine. When the tab goes to another site, or you switch to a tab where you have not clicked the icon, the panel says that PyMonkey has not been allowed there, and one more click on the icon allows it. (The icon opens the panel but does not close it. Close the panel with its own close button.)
+- **For good: save a script that runs automatically.** A script with a URL pattern starts without anybody clicking anything, so its site has to be allowed for good. When you save such a script, Chrome asks whether PyMonkey may read and change your data on that site. It asks once per site. If you say no, the script is saved all the same, but it does not start by itself: the panel's list marks it "(no access)", and a line under the URL pattern says why and has an **Allow** button for when you change your mind.
+
+Some things to know:
+
+- Chrome gives access by site, not by page. A script for `https://example.com/shop/*` asks for all of `example.com`, and a pattern for every site, such as `*://*/*`, asks for every site.
+- A tab allowed with the icon is for running by hand. A script with a pattern for that site still waits until the site has been allowed for good.
+- What you have allowed is listed, and can be taken back, on PyMonkey's **Details** page at `chrome://extensions`.
+- Pages that belong to the browser (`chrome://` pages, the Chrome Web Store, other extensions) cannot be allowed at all.
 
 ## Writing scripts
 
@@ -99,10 +113,10 @@ rates = page.fetch("https://api.example.com/rates", params={"base": "EUR"}).json
 
 `page.fetch` also takes `method`, `params` (added to the address), `headers`, a body as `data` (text, bytes, or a dict of form fields) or `json`, `timeout` in seconds (30 by default), and `cookies`. A response with an error status such as 404 is returned like any other; check `response.ok`. If there is no answer at all, `page.fetch` raises `ConnectionError`, or `TimeoutError` when it took too long. Those two and `HTTPError` are all `OSError`s, so `except OSError` catches any of them.
 
-**Requests and security.** A web page may only read answers from other sites that allow it (the browser's CORS rule). PyMonkey scripts are not held to that rule: the extension has permission for every site, so `page.fetch` can read any address. That is what makes combining data from several sites possible. It also means a script can read a site you are logged in to and send what it finds somewhere else, so there are two things to know:
+**Requests and security.** A web page may only read answers from other sites that allow it (the browser's CORS rule). On the sites you have allowed PyMonkey on (see [Site access](#site-access)) scripts are not held to that rule: `page.fetch` can read any address there, whichever page the script runs on. That is what makes combining data from several sites possible. On every other site `page.fetch` gets what a web page would get: an answer from addresses that let any site read them, as many public APIs do, and `ConnectionError` from the rest. When a script fails that way, the panel offers to ask you for access to the site. All of this means a script can read an allowed site you are logged in to and send what it finds somewhere else, so there are two things to know:
 
 - Cookies are what make a request count as you. `page.fetch` sends the browser's cookies only to the site the script is running on, so following links there works while you are logged in. Requests to any other site are made without cookies, as a stranger would make them, unless the script says `cookies=True`.
-- That default prevents accidents; it does not fence a script in. A script is ordinary Python running inside the extension, and can reach the browser's own `fetch` through Pyodide's `js` module, cookies included. Treat a script like any program you install: read it before you run it, above all one that somebody else wrote.
+- That default prevents accidents; it does not fence a script in. A script is ordinary Python running inside the extension, and can reach the browser's own `fetch` through Pyodide's `js` module, cookies included, on every site you have allowed. Treat a script like any program you install: read it before you run it, above all one that somebody else wrote.
 
 | Save (a file in your Downloads folder) | |
 |---|---|
@@ -131,7 +145,7 @@ From the keyboard, **Ctrl+Enter** runs the script and **Ctrl+S** saves it (**Cmd
 
 Each script has a **time limit**, 30 seconds unless you change it in the panel. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
 
-To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). More scripts in [`examples/`](examples).
+To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). The first time you save a script for a site, Chrome asks you to allow PyMonkey there (see [Site access](#site-access)). More scripts in [`examples/`](examples).
 
 Automatic runs happen whether or not the panel is open. PyMonkey keeps each script's **last automatic run**: when it ran, on which URL, whether it succeeded, and what it printed (long output is cut to its last 20,000 characters). Select a script in the panel to see it. When an automatic run fails, the toolbar icon gets a red badge with the number of failed scripts and the script is marked "(failed)" in the panel's list. The badge goes away once you have looked at the failure in the panel, or the script is deleted.
 
@@ -246,6 +260,8 @@ An extension is several isolated contexts that can only pass messages to each ot
 3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page. `page.store` calls take the same road as far as the background worker, which reads and writes the extension's storage. `page.fetch` requests need no road at all: the web worker makes them itself.
 4. When the script ends, its output is sent to the panel as a new message.
 
+The manifest asks for no site, so it cannot list the content script either. Instead the background worker registers the content script with Chrome when the extension is installed, and Chrome loads it on the sites the user has allowed for good. On a tab that was allowed with the toolbar icon, the background worker puts the content script into the page when a script is first run there.
+
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.
 
 Python is the heavy part, and it only gives memory back by being shut down. So the offscreen document does not stay forever: after five minutes with nothing to do it closes itself, and the background worker opens a new one the next time something needs Python. A run that made Python's memory grow a lot (a very large page) gets the worker replaced as soon as it is over, and after every run Python lets go of the page it was given. [docs/memory.md](docs/memory.md) has the measurements.
@@ -257,13 +273,13 @@ For the same reason the panel never holds one request open for the length of a r
 ```
 extension/
   manifest.json
-  background.js              message router, offscreen lifecycle, auto-run matching, storage
+  background.js              message router, offscreen lifecycle, auto-run matching, storage, the toolbar icon
   content.js                 page snapshot, DOM primitives, saving downloads
   offscreen/                 hidden page that owns the Python worker
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended, when to shut Python down
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended, when to shut Python down, site access
   vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
 scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
@@ -271,7 +287,7 @@ scripts/measure-memory.mjs   measures the extension's memory (`npm run measure`)
 examples/                    sample scripts
 docs/screenshots/            pictures of the panel, for this file
 docs/memory.md               how much memory PyMonkey takes, and what is done about it
-tests/                       unit tests + end-to-end test
+tests/                       unit tests + end-to-end test (extension-copy.mjs makes the copy of the extension it loads)
 ```
 
 ## Tests
@@ -280,6 +296,16 @@ tests/                       unit tests + end-to-end test
 npm test            # JavaScript unit tests (Node) + Python runtime (pytest, needs `pip install pytest beautifulsoup4`)
 npm run test:e2e    # loads the extension in Chrome for Testing and runs real scripts
 npm run measure     # not a test: prints how much memory the extension takes at each stage (see docs/memory.md)
+```
+
+The end-to-end test needs Chrome for Testing. If it is not found, install it with `npx @puppeteer/browsers install chrome@stable` and set `CHROME_PATH` to its binary.
+
+A test cannot answer Chrome's question about [site access](#site-access), so the end-to-end test (and `npm run measure`) loads a copy of the extension that has been allowed on the test's own pages, `http://localhost` and `http://127.0.0.1`, and on nothing else. Where the question would come up, a stand-in says no.
+
+The last check is different: it loads the extension as it is, allowed nowhere, clicks the toolbar icon and uses the real side panel. That needs a browser in which a test can click the icon. Chrome 157 is one, Chrome for Testing 145 is not, and there the check is reported as `SKIPPED`. To run it in another browser than the rest of the test:
+
+```bash
+TOOLBAR_CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:e2e
 ```
 
 ## License
