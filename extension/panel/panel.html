@@ -16,6 +16,13 @@
       <button id="new">New</button>
     </div>
 
+    <!-- The selected script's last automatic run. Hidden until it has one. -->
+    <details id="last-run" hidden>
+      <summary id="last-run-summary"></summary>
+      <p id="last-run-url"></p>
+      <pre id="last-run-output"></pre>
+    </details>
+
     <label>Name <input id="name" type="text" placeholder="My script" /></label>
 
     <label>

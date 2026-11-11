@@ -2,7 +2,8 @@
 // Talks only to the background service worker (target: "background").
 
 import { startRun } from "../lib/run-client.js";
-import { getScripts, saveScript, deleteScript } from "../lib/storage.js";
+import { describeLastRun, isLastRunKey } from "../lib/last-run.js";
+import { getScripts, getLastRuns, saveScript, deleteScript, markLastRunSeen } from "../lib/storage.js";
 import { timeoutSeconds } from "../lib/timeout.js";
 
 const $ = (id) => document.getElementById(id);
@@ -10,6 +11,8 @@ const els = {
   status: $("status"), list: $("script-list"), name: $("name"), match: $("match"),
   enabled: $("enabled"), timeout: $("timeout"), code: $("code"), output: $("output"),
   run: $("run"), stop: $("stop"), save: $("save"), del: $("delete"), newBtn: $("new"),
+  lastRun: $("last-run"), lastRunSummary: $("last-run-summary"),
+  lastRunUrl: $("last-run-url"), lastRunOutput: $("last-run-output"),
 };
 
 const STARTER = `# \`page\` is the page you are looking at.
@@ -23,6 +26,7 @@ for link in page.select("a[href]")[:10]:
 
 let currentId = null; // id of the script being edited, or null for an unsaved one
 let currentRun = null; // the run started with the Run button, while it is in flight
+let shownLastRun = null; // which last run the panel is showing ("<script id>:<time>")
 
 const toBackground = (message) => chrome.runtime.sendMessage({ ...message, target: "background" });
 
@@ -39,13 +43,37 @@ function loadIntoEditor(script) {
   els.enabled.checked = script?.enabled ?? true;
   els.timeout.value = timeoutSeconds(script?.timeout);
   els.code.value = script?.code ?? STARTER;
+  showLastRun();
+}
+
+// Show the last automatic run of the script being edited, if it has one.
+// Scripts auto-run whether or not the panel is open; this is where to find out how it went.
+async function showLastRun() {
+  const id = currentId;
+  const lastRun = id ? (await getLastRuns())[id] : null;
+  if (id !== currentId) return; // another script was picked while we were reading
+  els.lastRun.hidden = !lastRun;
+  if (!lastRun) return;
+  els.lastRunSummary.textContent = describeLastRun(lastRun);
+  els.lastRunUrl.textContent = lastRun.url;
+  els.lastRunOutput.textContent = [lastRun.stdout, lastRun.error].filter(Boolean).join("\n") || "(no output)";
+  els.lastRun.classList.toggle("error", !lastRun.ok);
+  // A run we were not showing yet: unfold it if it failed, so it cannot be missed.
+  // (Only then, so that folding it by hand sticks.)
+  if (shownLastRun !== `${id}:${lastRun.time}`) els.lastRun.open = !lastRun.ok;
+  shownLastRun = `${id}:${lastRun.time}`;
+  // The user has now seen this failure: the toolbar badge can stop counting it.
+  if (!lastRun.ok) await markLastRunSeen(id);
 }
 
 async function refreshList(selectId = currentId) {
   const scripts = await getScripts();
+  const lastRuns = await getLastRuns();
+  // A script whose last automatic run failed is marked in the list.
+  const label = (s) => (s.name || "Untitled") + (lastRuns[s.id]?.ok === false ? " (failed)" : "");
   els.list.replaceChildren(
     new Option("(unsaved script)", ""),
-    ...scripts.map((s) => new Option(s.name || "Untitled", s.id)),
+    ...scripts.map((s) => new Option(label(s), s.id)),
   );
   els.list.value = selectId ?? "";
   return scripts;
@@ -82,6 +110,7 @@ els.save.addEventListener("click", async () => {
   });
   currentId = saved.id;
   await refreshList();
+  await showLastRun();
 });
 
 els.del.addEventListener("click", async () => {
@@ -112,6 +141,13 @@ els.code.addEventListener("keydown", (e) => {
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.target !== "panel" || msg.type !== "run-finished" || !msg.meta?.auto) return;
   showOutput({ ...msg.result, stdout: `[auto-run: ${msg.meta.name}]\n${msg.result.stdout}` });
+});
+
+// A script auto-ran (its last run was stored), or one was marked as seen.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !Object.keys(changes).some(isLastRunKey)) return;
+  refreshList();
+  showLastRun();
 });
 
 // ---------- startup ----------

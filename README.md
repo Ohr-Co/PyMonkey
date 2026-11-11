@@ -64,6 +64,8 @@ Each script has a **time limit**, 30 seconds unless you change it in the panel. 
 
 To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). More scripts in [`examples/`](examples).
 
+Automatic runs happen whether or not the panel is open. PyMonkey keeps each script's **last automatic run**: when it ran, on which URL, whether it succeeded, and what it printed (long output is cut to its last 20,000 characters). Select a script in the panel to see it. When an automatic run fails, the toolbar icon gets a red badge with the number of failed scripts and the script is marked "(failed)" in the panel's list. The badge goes away once you have looked at the failure in the panel, or the script is deleted.
+
 Available packages: the Python standard library and BeautifulSoup. To bundle more [Pyodide packages](https://pyodide.org/en/stable/usage/packages-in-pyodide.html), add them to `BUNDLED_PACKAGES` in `scripts/setup.mjs` and rerun `npm run setup`.
 
 ## How it works
@@ -104,7 +106,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, script storage, run queue and run client, time limit
+  lib/                       URL matching, script and last-run storage, run queue and run client, time limit
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts

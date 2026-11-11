@@ -59,3 +59,9 @@ pre {
   word-break: break-word;
 }
 pre.error { color: var(--error); }
+
+details { font-size: 12px; }
+details summary { cursor: pointer; }
+details.error summary, details.error pre { color: var(--error); }
+details p { margin: 6px 0; opacity: 0.7; word-break: break-all; }
+details pre { min-height: 0; max-height: 160px; }

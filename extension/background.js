@@ -7,8 +7,9 @@
 //
 // Every message carries a `target` so each context can ignore the others' mail.
 
+import { countUnseenFailures, makeLastRun } from "./lib/last-run.js";
 import { urlMatches } from "./lib/match.js";
-import { getScripts } from "./lib/storage.js";
+import { getLastRuns, getScripts, saveLastRun } from "./lib/storage.js";
 
 const OFFSCREEN_URL = "offscreen/offscreen.html";
 
@@ -91,8 +92,13 @@ async function startRun({ tabId, code, timeout, runId, meta = {} }) {
   }
 }
 
-function runFinished({ runId, meta, result }) {
-  if (meta?.auto && !result.ok) console.warn(`[PyMonkey] "${meta.name}" failed on ${meta.url}\n${result.error}`);
+async function runFinished({ runId, meta, result }) {
+  if (meta?.auto) {
+    // Keep it as the script's last run, so it can be read in the panel later
+    // (see "last runs and the toolbar badge" below).
+    if (!result.ok) console.warn(`[PyMonkey] "${meta.name}" failed on ${meta.url}\n${result.error}`);
+    await saveLastRun(meta.scriptId, makeLastRun(meta, result)).catch(console.error);
+  }
   // Let the side panel show the result if it happens to be open.
   chrome.runtime
     .sendMessage({ target: "panel", type: "run-finished", runId, meta, result })
@@ -110,6 +116,34 @@ async function autoRun(tabId, url) {
     if (!started?.ok) runFinished({ runId, meta, result: { ok: false, stdout: "", error: started?.error } });
   }
 }
+
+// ---------- last runs and the toolbar badge ----------
+//
+// Scripts auto-run while the panel is closed, so a failure must be visible
+// somewhere else: the toolbar icon shows how many scripts failed on their last
+// automatic run and have not been looked at in the panel since.
+//
+// The number is never kept here. It is counted from storage every time the
+// stored data changes (a run was recorded, the panel marked one as seen, a
+// script was deleted), which also wakes this worker up if it was stopped.
+
+async function updateBadge() {
+  const failed = countUnseenFailures(Object.values(await getLastRuns()));
+  await chrome.action.setBadgeBackgroundColor({ color: "#b3261e" });
+  await chrome.action.setBadgeText({ text: failed ? String(failed) : "" }); // "" hides the badge
+  await chrome.action.setTitle({
+    title: failed
+      ? `PyMonkey: ${failed} ${failed === 1 ? "script" : "scripts"} failed on the last automatic run. Open to see why.`
+      : "Open PyMonkey",
+  });
+}
+
+chrome.storage.onChanged.addListener((_changes, area) => {
+  if (area === "local") updateBadge().catch(console.error);
+});
+// The badge is not kept across a browser restart or an extension update.
+chrome.runtime.onStartup.addListener(() => updateBadge().catch(console.error));
+chrome.runtime.onInstalled.addListener(() => updateBadge().catch(console.error));
 
 // ---------- the router ----------
 
