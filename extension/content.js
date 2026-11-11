@@ -1,7 +1,8 @@
 // Content script: the ONLY part of PyMonkey that can touch the real page.
-// It has no Python. It does two things when the background asks, both as "dom" operations:
+// It has no Python. It does three things when the background asks, all as "dom" operations:
 //   1. snapshot the page (HTML string) so Python can read it with BeautifulSoup
 //   2. run one DOM primitive (click, set_text, ...) on Python's behalf
+//   3. save a file Python made to the Downloads folder (page.download)
 //
 // Each primitive here has a matching method on `Page` in python/pymonkey_runtime.py.
 
@@ -74,6 +75,22 @@
         }, timeout * 1000);
         observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
       });
+    },
+
+    // Save a file to the Downloads folder the way a download link on a page
+    // does: make a link to the data, give it a file name, and click it.
+    // The link is never added to the page, so the page does not notice.
+    // (`base64` is the file's bytes as text: messages carry JSON, not bytes.)
+    download({ filename, base64, type }) {
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type }));
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      // Free the copy held under `url` once the browser has had time to save it.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      return true;
     },
   };
 

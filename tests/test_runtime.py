@@ -5,6 +5,8 @@
 
 import asyncio
 import base64
+import csv
+import io
 import json
 import sys
 from pathlib import Path
@@ -529,3 +531,131 @@ def test_slow_answer_raises_timeout_error():
 def test_fetch_may_be_written_with_await():
     result, _ = run("r = await page.fetch('/x')\nprint(r.text)", http=answer("old habit"))
     assert result == {"ok": True, "stdout": "old habit\n", "error": None}
+
+
+# ---------- page.download ----------
+
+
+def downloaded(code):
+    """Run a script that downloads one file. Returns (result, file name, file bytes, MIME type)."""
+    result, calls = run(code)
+    if not calls:
+        return result, None, None, None
+    [(op, args)] = calls
+    assert op == "download"
+    return result, args["filename"], base64.b64decode(args["base64"]), args["type"]
+
+
+def read_csv(content):
+    """Parse a downloaded CSV the way a spreadsheet would: as UTF-8 with a marker at the start."""
+    assert content.startswith(b"\xef\xbb\xbf")  # the marker that makes Excel read it as UTF-8
+    return list(csv.reader(io.StringIO(content.decode("utf-8-sig"), newline="")))
+
+
+def test_download_list_of_dicts_as_csv_with_headers():
+    result, name, content, mime = downloaded(
+        "rows = [{'text': 'One', 'href': '/one'}, {'text': 'Two, \"quoted\"', 'href': '/two'}]\n"
+        "print(page.download('links.csv', rows))"
+    )
+    assert result == {"ok": True, "stdout": "None\n", "error": None}
+    assert (name, mime) == ("links.csv", "text/csv;charset=utf-8")
+    assert read_csv(content) == [["text", "href"], ["One", "/one"], ['Two, "quoted"', "/two"]]
+
+
+def test_download_csv_columns_are_the_keys_in_order_of_first_appearance():
+    _, _, content, _ = downloaded(
+        "page.download('x.csv', [{'b': 1, 'a': 2}, {'a': 3, 'c': None}, {}, {'b': 'é\\nline two', 'd': [1, 2]}])"
+    )
+    assert read_csv(content) == [
+        ["b", "a", "c", "d"],
+        ["1", "2", "", ""],
+        ["", "3", "", ""],  # None and missing keys are empty cells
+        ["", "", "", ""],
+        ["é\nline two", "", "", "[1, 2]"],
+    ]
+
+
+def test_download_csv_from_lists_has_no_header_and_a_generator_works():
+    _, _, content, _ = downloaded("page.download('x.CSV', [[1, 'a'], (2, 'b')])")
+    assert read_csv(content) == [["1", "a"], ["2", "b"]]
+    _, _, content, _ = downloaded("page.download('x.csv', ({'n': n} for n in range(3)))")
+    assert read_csv(content) == [["n"], ["0"], ["1"], ["2"]]
+    _, _, content, _ = downloaded("page.download('x.csv', [])")
+    assert read_csv(content) == []
+
+
+def test_download_ten_thousand_rows():
+    code = (
+        "rows = [{'n': n, 'title': f'Item {n}, with a comma', 'url': f'https://example.com/items/{n}'} for n in range(10_000)]\n"
+        "page.download('items.csv', rows)\n"
+    )
+    result, _, content, _ = downloaded(code)
+    assert result["ok"], result["error"]
+    rows = read_csv(content)
+    assert len(rows) == 10_001
+    assert rows[0] == ["n", "title", "url"]
+    assert rows[10_000] == ["9999", "Item 9999, with a comma", "https://example.com/items/9999"]
+
+
+def test_download_any_json_value_as_json():
+    value = {"items": [1, 2.5, "é", None, True], "nested": {"a": []}}
+    result, name, content, mime = downloaded(f"page.download('data.json', {value!r})")
+    assert result["ok"], result["error"]
+    assert (name, mime) == ("data.json", "application/json")
+    assert json.loads(content) == value
+    assert "é" in content.decode("utf-8")  # readable, not é
+    for simple in ["[1, 2]", "5", "None", "[{'a': 1}]"]:
+        _, _, content, _ = downloaded(f"page.download('x.json', {simple})")
+        assert json.loads(content) == eval(simple)
+
+
+def test_download_text_and_bytes_are_saved_as_they_are():
+    _, name, content, mime = downloaded("page.download('notes.txt', 'héllo\\n')")
+    assert (name, content, mime) == ("notes.txt", "héllo\n".encode(), "text/plain;charset=utf-8")
+    _, _, content, mime = downloaded("page.download('logo.png', bytes([137, 80, 0, 255]))")
+    assert (content, mime) == (bytes([137, 80, 0, 255]), "application/octet-stream")
+    # A string is never converted, whatever the file is called.
+    _, _, content, _ = downloaded("page.download('ready.csv', 'a,b\\n1,2\\n')")
+    assert content == b"a,b\n1,2\n"
+    _, _, content, _ = downloaded("""page.download('ready.json', '{"a": 1}')""")
+    assert content == b'{"a": 1}'
+
+
+@pytest.mark.parametrize(
+    "call, expected",
+    [
+        ("page.download('x.csv', {'a': 1})", "TypeError: For a .csv file, pass a list of dicts (one per row) or a list of lists"),
+        ("page.download('x.csv', [1, 2])", "TypeError: For a .csv file, pass a list of dicts"),
+        ("page.download('x.csv', [{'a': 1}, [2]])", "TypeError: For a .csv file, pass a list of dicts"),
+        ("page.download('x.csv', 5)", "TypeError: For a .csv file, pass a list of dicts"),
+        ("page.download('x.json', {1, 2})", "is not JSON serializable"),
+        ("page.download('x.json', float('nan'))", "ValueError"),
+        ("page.download('x.txt', [1, 2])", "For 'x.txt', pass the content as a string or bytes"),
+        ("page.download('noextension', {'a': 1})", "pass the content as a string or bytes"),
+        ("page.download('', 'x')", "ValueError: page.download needs a file name such as 'links.csv'"),
+        ("page.download(5, 'x')", "ValueError: page.download needs a file name"),
+        ("page.download('../x.csv', [])", "give a file name, not a path"),
+        ("page.download('a\\\\b.csv', [])", "give a file name, not a path"),
+    ],
+)
+def test_download_rejects_what_it_cannot_save(call, expected):
+    result, calls = run(call)
+    assert expected in result["error"]
+    assert calls == []  # nothing was sent to the page
+
+
+def test_download_refuses_a_file_too_large_to_send():
+    size = pymonkey_runtime.MAX_DOWNLOAD_BYTES + 1
+    result, calls = run(f"page.download('big.bin', bytes({size}))")
+    assert "ValueError: big.bin would be 30 MB; page.download saves files up to 30 MB" in result["error"]
+    assert calls == []
+
+
+def test_download_failure_raises_page_error():
+    result, _ = run("page.download('x.txt', 'x')", replies={"download": {"ok": False, "error": "no page"}})
+    assert "PageError: no page" in result["error"]
+
+
+def test_download_may_be_written_with_await():
+    result, name, _, _ = downloaded("await page.download('links.csv', [{'a': 1}])")  # as in the issue's example
+    assert result["ok"] and name == "links.csv"

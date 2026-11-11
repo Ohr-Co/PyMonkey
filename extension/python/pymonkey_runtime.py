@@ -12,11 +12,14 @@ How a script sees the page:
            page has done it, so no `await` is needed.
   * STORE: `page.store` keeps values between runs, one store per saved script.
   * FETCH: `page.fetch(url)` makes an HTTP request to any address.
+  * SAVE:  `page.download("rows.csv", rows)` saves a file to the Downloads folder.
 """
 
 import ast
 import base64
+import csv
 import inspect
+import io
 import json
 import traceback
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
@@ -249,6 +252,73 @@ def _send(host_call, request):
     )
 
 
+# A downloaded file crosses three message hops as base64 text, and Chrome
+# refuses messages above 64 MB. This leaves room to spare.
+MAX_DOWNLOAD_BYTES = 30 * 1024 * 1024
+
+
+def _to_csv(rows):
+    """CSV text for a list of dicts (one per row, keys become the header) or a list of lists."""
+    not_a_table = TypeError("For a .csv file, pass a list of dicts (one per row) or a list of lists")
+    if isinstance(rows, dict):  # one dict is one row at best, and it has no list around it
+        raise not_a_table
+    try:
+        rows = list(rows)  # also accepts a generator
+    except TypeError:
+        raise not_a_table from None
+    out = io.StringIO(newline="")  # the csv module writes its own line endings
+    if all(isinstance(row, dict) for row in rows):
+        # One column per key, in the order the keys first appear. A row
+        # without a key gets an empty cell.
+        columns = list(dict.fromkeys(key for row in rows for key in row))
+        if columns:
+            writer = csv.DictWriter(out, fieldnames=columns, restval="")
+            writer.writeheader()
+            writer.writerows(rows)
+    elif all(isinstance(row, (list, tuple)) for row in rows):
+        csv.writer(out).writerows(rows)
+    else:
+        raise not_a_table
+    return out.getvalue()
+
+
+def _to_file(filename, data):
+    """The bytes and the MIME type of the file `page.download(filename, data)` saves.
+
+    Text and bytes are saved as they are. Anything else is converted the way
+    the end of the file name says: .csv or .json.
+    """
+    if not isinstance(filename, str) or not filename.strip():
+        raise ValueError(f"page.download needs a file name such as 'links.csv', not {filename!r}")
+    if "/" in filename or "\\" in filename:
+        raise ValueError(f"page.download saves to the Downloads folder: give a file name, not a path ({filename!r})")
+    kind = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if isinstance(data, (bytes, bytearray)):
+        content, mime = bytes(data), "application/octet-stream"
+    elif isinstance(data, str):
+        content, mime = data.encode("utf-8"), "text/plain;charset=utf-8"
+    elif kind == "csv":
+        # "utf-8-sig" puts a marker at the start of the file. Without it Excel
+        # does not recognize UTF-8 and shows "é" as "Ã©".
+        content, mime = _to_csv(data).encode("utf-8-sig"), "text/csv;charset=utf-8"
+    elif kind == "json":
+        text = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False)
+        content, mime = (text + "\n").encode("utf-8"), "application/json"
+    else:
+        raise TypeError(
+            f"page.download turns data into a file for names ending in .csv or .json. "
+            f"For {filename!r}, pass the content as a string or bytes."
+        )
+
+    if len(content) > MAX_DOWNLOAD_BYTES:
+        raise ValueError(
+            f"{filename} would be {len(content) / 1024 / 1024:.0f} MB; "
+            f"page.download saves files up to {MAX_DOWNLOAD_BYTES // 1024 // 1024} MB. Split it into several files."
+        )
+    return content, mime
+
+
 class Page:
     """The `page` object available to every script."""
 
@@ -328,6 +398,22 @@ class Page:
         info = self._dom("snapshot")
         self.url, self.title, self.html = info["url"], info["title"], info["html"]
         self._soup = None
+
+    # ---- saving (a file in the browser's Downloads folder) ----
+
+    def download(self, filename, data):
+        """Save `data` as the file `filename` in the browser's Downloads folder.
+
+        "name.csv"  -- `data` is a list of dicts, one per row; the keys become
+                       the header line. A list of lists is written without one.
+        "name.json" -- `data` is anything JSON can hold.
+        any name    -- `data` is a string or bytes, saved as it is.
+
+        The page is asked to do the saving, exactly as if it had a download
+        link that was clicked, so the file arrives like any other download.
+        """
+        content, mime = _to_file(filename, data)
+        self._dom("download", filename=filename, base64=base64.b64encode(content).decode("ascii"), type=mime)
 
     # ---- fetching (HTTP requests to other addresses) ----
 
