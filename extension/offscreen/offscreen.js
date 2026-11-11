@@ -5,7 +5,7 @@
 // Its only jobs:
 //   * pass run/warm requests from the background to the worker
 //   * pass the worker's DOM requests back out (workers have no chrome.* APIs)
-//   * kill and restart the worker if a script hangs (e.g. `while True: pass`)
+//   * kill the worker if a script hangs; the next request starts a new one (e.g. `while True: pass`)
 
 const RUN_TIMEOUT_MS = 30_000; // counted from when the script actually starts
 
@@ -16,21 +16,31 @@ const pending = new Map(); // id -> { resolve, timer }
 function startWorker() {
   worker = new Worker("../worker/pyodide-worker.js", { type: "module" });
   worker.onmessage = ({ data }) => onWorkerMessage(data);
-  worker.onerror = (e) => restartWorker(`Python runtime crashed: ${e.message}`);
+  worker.onerror = (e) => {
+    // No message means the worker file itself failed to load, which in practice
+    // means the Pyodide files are missing from extension/vendor/pyodide.
+    const reason = e.message
+      ? `Python runtime crashed: ${e.message}`
+      : "Pyodide files not found in extension/vendor/pyodide. In the project folder run " +
+        "`npm install` then `npm run setup`, then reload the extension at chrome://extensions.";
+    stopWorker(reason);
+  };
 }
 
-function restartWorker(reason) {
+// Stop the worker and fail everything in flight. The next request starts a fresh one.
+function stopWorker(reason) {
   worker?.terminate();
+  worker = null;
   for (const { resolve, timer } of pending.values()) {
     clearTimeout(timer);
     resolve({ ok: false, stdout: "", error: reason });
   }
   pending.clear();
-  startWorker();
 }
 
 function callWorker(message) {
   return new Promise((resolve) => {
+    if (!worker) startWorker();
     const id = nextId++;
     pending.set(id, { resolve, timer: null });
     worker.postMessage({ ...message, id });
@@ -44,7 +54,7 @@ function onWorkerMessage(data) {
     // Python is loaded and the script is now executing: start the clock.
     if (entry) {
       entry.timer = setTimeout(
-        () => restartWorker(`Script stopped: it ran longer than ${RUN_TIMEOUT_MS / 1000}s.`),
+        () => stopWorker(`Script stopped: it ran longer than ${RUN_TIMEOUT_MS / 1000}s.`),
         RUN_TIMEOUT_MS,
       );
     }
