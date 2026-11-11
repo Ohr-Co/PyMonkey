@@ -38,6 +38,9 @@ export function createRunQueue({ start, onFinished, keep = KEEP_FINISHED }) {
     /** True if `runId` is the run executing right now. */
     isActive: (runId) => active?.runId === runId,
 
+    /** True if no run is executing or waiting. */
+    isEmpty: () => !active && waiting.length === 0,
+
     /** The active run is over (result, timeout, crash). Remember it, start the next one. */
     finishActive(result) {
       if (!active) return;

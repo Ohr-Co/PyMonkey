@@ -125,6 +125,8 @@ What you type is not lost when the panel closes: the panel reopens with the scri
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once. The line at the top of the panel says what Python is doing: **Loading Python…** when the panel first opens, then **Ready**, **Running…** during a run, and after a run that did not finish **Stopped** (by you or by the time limit) or **Script failed**.
 
+Python takes memory, about 125 MB while it is loaded, so PyMonkey does not keep it around for nothing. When no script has run for five minutes, Python is shut down and the memory goes back to your computer. The next run loads it again by itself, and starts about two seconds later for it. Opening the panel loads it too. The numbers are in [docs/memory.md](docs/memory.md).
+
 From the keyboard, **Ctrl+Enter** runs the script and **Ctrl+S** saves it (**Cmd** instead of Ctrl on a Mac), wherever in the panel you are typing. Under the list of scripts, the panel says whether the script you are looking at is saved: "Not saved", "Unsaved changes" or "Saved". The panel follows your system's light or dark mode.
 
 Each script has a **time limit**, 30 seconds unless you change it in the panel. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
@@ -246,6 +248,8 @@ An extension is several isolated contexts that can only pass messages to each ot
 
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.
 
+Python is the heavy part, and it only gives memory back by being shut down. So the offscreen document does not stay forever: after five minutes with nothing to do it closes itself, and the background worker opens a new one the next time something needs Python. A run that made Python's memory grow a lot (a very large page) gets the worker replaced as soon as it is over, and after every run Python lets go of the page it was given. [docs/memory.md](docs/memory.md) has the measurements.
+
 For the same reason the panel never holds one request open for the length of a run: Chrome would drop the answer if it shut the background worker down in the meantime. Starting a run is answered at once, the result arrives later as its own message, and the panel checks on the run every few seconds. If a run is lost (for example the extension was reloaded while it ran), the panel says so instead of waiting.
 
 ## Project layout
@@ -259,12 +263,14 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended, when to shut Python down
   vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
 scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
+scripts/measure-memory.mjs   measures the extension's memory (`npm run measure`)
 examples/                    sample scripts
 docs/screenshots/            pictures of the panel, for this file
+docs/memory.md               how much memory PyMonkey takes, and what is done about it
 tests/                       unit tests + end-to-end test
 ```
 
@@ -273,6 +279,7 @@ tests/                       unit tests + end-to-end test
 ```bash
 npm test            # JavaScript unit tests (Node) + Python runtime (pytest, needs `pip install pytest beautifulsoup4`)
 npm run test:e2e    # loads the extension in Chrome for Testing and runs real scripts
+npm run measure     # not a test: prints how much memory the extension takes at each stage (see docs/memory.md)
 ```
 
 ## License

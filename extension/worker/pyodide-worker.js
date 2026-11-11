@@ -42,6 +42,12 @@ make_sync
 
 const SETUP_HINT = "In the project folder run `npm run setup`, then reload the extension at chrome://extensions.";
 
+// The size of Python's memory in bytes: one block (the WebAssembly "heap")
+// that grows when Python needs more and never shrinks. Pyodide has no official
+// way to ask for it, so this looks inside (`_module` is the compiled Python
+// itself) and gives 0 if a later Pyodide has moved things.
+const heapBytes = (pyodide) => pyodide._module?.HEAPU8?.length ?? 0;
+
 async function boot() {
   const vendor = new URL("../vendor/pyodide/", import.meta.url);
   const pyodide = await loadPyodide({ indexURL: vendor.href });
@@ -63,6 +69,7 @@ async function boot() {
   return {
     pyodide,
     index,
+    freshBytes: heapBytes(pyodide),
     runtime: pyodide.pyimport(RUNTIME_MODULE),
     makeSync: pyodide.runPython(MAKE_SYNC),
     // find_imports(code) lists the modules a script imports, by reading it
@@ -130,6 +137,7 @@ async function loadPackagesFor(code, { pyodide, index, findImports }) {
 
 async function handleRun({ id, tabId, scriptId, code, page }) {
   let result;
+  let heap = null; // how large Python's memory is after this run (see lib/memory.js)
   try {
     const ready = await runtimeReady;
     const { runtime, makeSync, index } = ready;
@@ -143,13 +151,16 @@ async function handleRun({ id, tabId, scriptId, code, page }) {
     } finally {
       hostCall.destroy(); // release the Python function we were holding from JavaScript
     }
+    // Python has let go of the page by now (see run() in pymonkey_runtime.py),
+    // and `page`, JavaScript's copy, is dropped when this function returns.
+    heap = { bytes: heapBytes(ready.pyodide), freshBytes: ready.freshBytes };
     // An import that failed: say how to get the package.
     const hint = missingModuleHint(result.error, index);
     if (hint) result.error = `${result.error.trimEnd()}\n\n${hint}\n`;
   } catch (err) {
     result = { ok: false, stdout: "", error: `PyMonkey runtime error: ${err?.message ?? err}` };
   }
-  self.postMessage({ type: "result", id, result });
+  self.postMessage({ type: "result", id, result, heap });
 }
 
 async function handleWarm({ id }) {

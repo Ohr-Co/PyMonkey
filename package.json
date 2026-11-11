@@ -8,7 +8,8 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "test": "node --test tests/*.test.mjs && python3 -m pytest -q tests/",
-    "test:e2e": "node tests/e2e.mjs"
+    "test:e2e": "node tests/e2e.mjs",
+    "measure": "node scripts/measure-memory.mjs"
   },
   "devDependencies": {
     "@codemirror/commands": "6.11.1",

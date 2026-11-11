@@ -18,34 +18,49 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(consol
 
 // ---------- offscreen document (where Python runs) ----------
 
+// The offscreen document is not always there: it closes itself when nobody
+// has asked for Python for a few minutes, to give its memory back (see
+// lib/memory.js). So every message to it goes through sendToOffscreen, which
+// opens the document first if need be.
+
 let creatingOffscreen = null;
 
 async function ensureOffscreen() {
-  const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
-  if (existing.length === 0) {
-    // Two callers at once must not both call createDocument (only one doc is allowed).
-    creatingOffscreen ??= chrome.offscreen
-      .createDocument({
-        url: OFFSCREEN_URL,
-        reasons: ["WORKERS"],
-        justification: "Runs the Python (Pyodide/WebAssembly) runtime in a web worker.",
-      })
-      .finally(() => (creatingOffscreen = null));
-    await creatingOffscreen;
-  }
-  // The document can exist a moment before its script is listening. Wait for a
-  // reply to a ping so the real message is never sent into the void.
+  let problem = null;
+  // Up to 5 seconds. The document can exist a moment before its script is
+  // listening, and a document that is closing still exists for a moment but
+  // no longer answers. So: look, create it if there is none, and wait for a
+  // reply to a ping, so that the real message is never sent into the void.
   for (let attempt = 0; attempt < 100; attempt++) {
+    const existing = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+    if (existing.length === 0) {
+      // Two callers at once must not both call createDocument (only one doc is allowed).
+      creatingOffscreen ??= chrome.offscreen
+        .createDocument({
+          url: OFFSCREEN_URL,
+          reasons: ["WORKERS"],
+          justification: "Runs the Python (Pyodide/WebAssembly) runtime in a web worker.",
+        })
+        .catch((err) => (problem = err)) // tried again on the next round
+        .finally(() => (creatingOffscreen = null));
+      await creatingOffscreen;
+    }
     const reply = await chrome.runtime.sendMessage({ target: "offscreen", type: "ping" }).catch(() => null);
     if (reply?.ok) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("the Python runtime page did not start.");
+  throw new Error(`the Python runtime page did not start${problem ? ` (${problem.message})` : ""}.`);
 }
 
 async function sendToOffscreen(message) {
   await ensureOffscreen();
-  return chrome.runtime.sendMessage({ ...message, target: "offscreen" });
+  const send = () => chrome.runtime.sendMessage({ ...message, target: "offscreen" });
+  const reply = await send().catch(() => undefined);
+  if (reply !== undefined) return reply;
+  // No answer: the document closed itself between the ping and this message.
+  // It did nothing with the message, so it is safe to send it again, to a new document.
+  await ensureOffscreen();
+  return send();
 }
 
 // ---------- talking to a tab ----------
