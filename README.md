@@ -111,6 +111,10 @@ npm test            # URL matcher (Node) + Python runtime (pytest, needs `pip in
 npm run test:e2e    # loads the extension in Chrome for Testing and runs real scripts
 ```
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests and how to propose a change. Contributors are asked to agree to the [contributor license agreement](CLA.md), which lets the project be offered under other license terms later while you keep the copyright in your work.
+
 ## License
 
 [AGPL-3.0](LICENSE)
