@@ -6,10 +6,17 @@
 // Manifest V3 forbids loading code from a CDN at runtime.
 
 import { httpFetch } from "../lib/http.js";
+import { missingModuleHint, packagesFor } from "../lib/packages.js";
 import { loadPyodide } from "../vendor/pyodide/pyodide.mjs";
 
-// Packages imported into every runtime. Keep this list short: each one costs
-// startup time and memory. Must also be listed in scripts/setup.mjs.
+// Packages loaded into every runtime at startup. Keep this list short: each
+// one costs startup time and memory whether or not a script uses it. Every
+// other package in BUNDLED_PACKAGES (scripts/setup.mjs, where these must be
+// listed too) is loaded when a script that imports it is about to run.
+//
+// A parser for BeautifulSoup (lxml, html5lib) has to be preloaded to be found:
+// BeautifulSoup looks for parsers once, when it is first imported, and a
+// script that says BeautifulSoup(html, "lxml") never imports lxml itself.
 const PRELOADED_PACKAGES = ["beautifulsoup4"];
 
 const RUNTIME_MODULE = "pymonkey_runtime";
@@ -33,18 +40,35 @@ def make_sync(js_function):
 make_sync
 `;
 
+const SETUP_HINT = "In the project folder run `npm run setup`, then reload the extension at chrome://extensions.";
+
 async function boot() {
-  const pyodide = await loadPyodide({
-    indexURL: new URL("../vendor/pyodide/", import.meta.url).href,
-  });
+  const vendor = new URL("../vendor/pyodide/", import.meta.url);
+  const pyodide = await loadPyodide({ indexURL: vendor.href });
   await pyodide.loadPackage(PRELOADED_PACKAGES);
+
+  // Which import needs which package (see lib/packages.js).
+  const index = await fetch(new URL("packages.json", vendor)).then(
+    (response) => response.json(),
+    () => {
+      throw new Error(`extension/vendor/pyodide/packages.json is missing. ${SETUP_HINT}`);
+    },
+  );
 
   // Install our Python module into site-packages so it can be imported.
   const source = await (await fetch(new URL(`../python/${RUNTIME_MODULE}.py`, import.meta.url))).text();
   const sitePackages = pyodide.runPython("import site; site.getsitepackages()[0]");
   pyodide.FS.writeFile(`${sitePackages}/${RUNTIME_MODULE}.py`, source);
 
-  return { runtime: pyodide.pyimport(RUNTIME_MODULE), makeSync: pyodide.runPython(MAKE_SYNC) };
+  return {
+    pyodide,
+    index,
+    runtime: pyodide.pyimport(RUNTIME_MODULE),
+    makeSync: pyodide.runPython(MAKE_SYNC),
+    // find_imports(code) lists the modules a script imports, by reading it
+    // (nothing is run). A script with a syntax error gets an empty list.
+    findImports: pyodide.pyimport("pyodide.code").find_imports,
+  };
 }
 
 // Start loading immediately; every request awaits this same promise.
@@ -79,12 +103,37 @@ function makeHostCall(context) {
   };
 }
 
+// ---------- packages ----------
+
+const loadedPackages = new Set(PRELOADED_PACKAGES);
+
+/**
+ * Load the bundled packages this script imports that are not loaded yet.
+ * It takes a moment (a tenth of a second or so per package) the first time;
+ * after that the package stays loaded for as long as this worker lives.
+ */
+async function loadPackagesFor(code, { pyodide, index, findImports }) {
+  const imports = findImports(code); // a Python list: copy it to a JavaScript array, then let go of it
+  const modules = imports.toJs();
+  imports.destroy();
+  const names = packagesFor(modules, index).filter((name) => !loadedPackages.has(name));
+  if (names.length === 0) return;
+  // Unlike Python's `import`, loadPackage reports a failure through this
+  // callback instead of raising it.
+  const problems = [];
+  await pyodide.loadPackage(names, { errorCallback: (message) => problems.push(message) });
+  if (problems.length > 0) throw new Error(`${problems.join(" ")}. ${SETUP_HINT}`); // a package file is missing
+  names.forEach((name) => loadedPackages.add(name));
+}
+
 // ---------- message handling ----------
 
 async function handleRun({ id, tabId, scriptId, code, page }) {
   let result;
   try {
-    const { runtime, makeSync } = await runtimeReady;
+    const ready = await runtimeReady;
+    const { runtime, makeSync, index } = ready;
+    await loadPackagesFor(code, ready); // before "started": not counted in the script's time limit
     self.postMessage({ type: "started", id });
     // runtime.run is `async def run(code, page_json, host_call)` and returns JSON.
     // Python gets a host_call that waits for the reply instead of returning a promise.
@@ -94,6 +143,9 @@ async function handleRun({ id, tabId, scriptId, code, page }) {
     } finally {
       hostCall.destroy(); // release the Python function we were holding from JavaScript
     }
+    // An import that failed: say how to get the package.
+    const hint = missingModuleHint(result.error, index);
+    if (hint) result.error = `${result.error.trimEnd()}\n\n${hint}\n`;
   } catch (err) {
     result = { ok: false, stdout: "", error: `PyMonkey runtime error: ${err?.message ?? err}` };
   }

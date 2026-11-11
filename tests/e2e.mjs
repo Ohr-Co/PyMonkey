@@ -280,6 +280,34 @@ try {
   assert.equal(await downloadedFile("notes.txt"), "just text");
   console.log("ok  page.download saves CSV (10,000 rows), JSON and text files");
 
+  // Packages: a bundled package is loaded when a script that imports it runs, not at startup
+  const isLoaded = `import importlib.util\nprint([importlib.util.find_spec(m) is not None for m in ("bs4", "dateutil", "tzdata")])`;
+  result = await run(isLoaded);
+  assert.equal(result.stdout, "[True, False, False]\n"); // BeautifulSoup is preloaded, the others are not there yet
+  result = await run(
+    `def paris(text):\n    from dateutil import parser\n    from zoneinfo import ZoneInfo\n    return parser.parse(text).replace(tzinfo=ZoneInfo("Europe/Paris"))\n\nprint(paris("3 March 2024, 5pm").isoformat())`,
+  );
+  assert.equal(result.error, null);
+  assert.equal(result.stdout, "2024-03-03T17:00:00+01:00\n");
+  result = await run(isLoaded);
+  assert.equal(result.stdout, "[True, True, True]\n"); // and they stay loaded for the next script
+  console.log("ok  bundled packages load on first import");
+
+  // A package that is not bundled: the error says how to add it
+  result = await run(`print("before")\nimport sympy`);
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "before\n");
+  assert.match(
+    result.error,
+    /line 2, in <module>\nModuleNotFoundError: No module named 'sympy'\n\nPyMonkey does not come with the package "sympy", but it can be added:\n  1\. In scripts\/setup\.mjs, add "sympy" to BUNDLED_PACKAGES\.\n  2\. In the project folder, run `npm run setup`\.\n  3\. Reload PyMonkey at chrome:\/\/extensions\.\n$/,
+  );
+  result = await run(`import openpyxl`); // Pyodide has no such package
+  assert.match(result.error, /No module named 'openpyxl'\n\nPython in PyMonkey has no module named "openpyxl", and none of the packages that can be added has one\./);
+  // A script that copes with the missing package is left alone.
+  result = await run(`try:\n    import sympy\nexcept ImportError:\n    print("doing without")`);
+  assert.deepEqual([result.ok, result.stdout], [true, "doing without\n"]);
+  console.log("ok  importing a package that is not bundled says how to add it");
+
   // 3. Errors come back as Python tracebacks
   result = await run(`await page.click("#missing")`);
   assert.equal(result.ok, false);

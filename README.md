@@ -24,7 +24,7 @@ Requires Chrome 137 or newer, and [Node.js](https://nodejs.org) 22+ (only to fet
 git clone https://github.com/Ohr-Co/PyMonkey.git
 cd PyMonkey
 npm install
-npm run setup      # copies Pyodide + bundled Python packages into extension/vendor/
+npm run setup      # copies Pyodide + the bundled Python packages into extension/vendor/
 ```
 
 Then in Chrome:
@@ -122,7 +122,62 @@ To run a script automatically, save it with a URL pattern such as `https://examp
 
 Automatic runs happen whether or not the panel is open. PyMonkey keeps each script's **last automatic run**: when it ran, on which URL, whether it succeeded, and what it printed (long output is cut to its last 20,000 characters). Select a script in the panel to see it. When an automatic run fails, the toolbar icon gets a red badge with the number of failed scripts and the script is marked "(failed)" in the panel's list. The badge goes away once you have looked at the failure in the panel, or the script is deleted.
 
-Available packages: the Python standard library and BeautifulSoup. To bundle more [Pyodide packages](https://pyodide.org/en/stable/usage/packages-in-pyodide.html), add them to `BUNDLED_PACKAGES` in `scripts/setup.mjs` and rerun `npm run setup`.
+Scripts can import the Python standard library, BeautifulSoup and a few more packages, and you can add others: see [Packages](#packages).
+
+## Packages
+
+Besides the Python standard library, PyMonkey comes with:
+
+| Package | In a script | Loaded | What it is for |
+|---|---|---|---|
+| beautifulsoup4 | `import bs4` | at startup | `page.soup` and `page.select()` are built on it |
+| python-dateutil | `import dateutil` | on first import | Reads dates the way pages write them: `parser.parse("3 March 2024, 5pm")` |
+| tzdata | `import zoneinfo` | on first import | The time zones for the standard library's `zoneinfo`, which has none in a browser without it |
+
+```python
+from dateutil import parser
+from zoneinfo import ZoneInfo
+
+posted = parser.parse("3 March 2024, 5pm").replace(tzinfo=ZoneInfo("Europe/Paris"))
+print(posted.isoformat())    # 2024-03-03T17:00:00+01:00
+```
+
+**Loaded on first import** means the package costs nothing until a script uses it. Before a script starts, PyMonkey reads it for `import` lines and loads the bundled packages it finds, which takes about a tenth of a second per package and is not counted in the script's time limit. The package then stays loaded until Python is restarted. Only `import` lines are seen: a script that imports by other means, such as `importlib.import_module("dateutil")`, needs an `import dateutil` line too, and the error says so.
+
+**Adding a package.** Any package in [Pyodide's list](https://pyodide.org/en/stable/usage/packages-in-pyodide.html) can be added:
+
+1. In `scripts/setup.mjs`, add its name to `BUNDLED_PACKAGES`. The packages it depends on come along automatically.
+2. Run `npm run setup`.
+3. Reload PyMonkey at `chrome://extensions`.
+
+A script that imports a package that is not there fails with an error that gives these same steps, or says that the package cannot be added. Packages outside Pyodide's list cannot be added: an extension may not download code while it runs, so `pip` and `micropip` are not an option.
+
+Two packages need a word before you add them:
+
+- **A parser for BeautifulSoup** (`lxml`, `html5lib`) must also go into `PRELOADED_PACKAGES` in `extension/worker/pyodide-worker.js`. BeautifulSoup looks for parsers once, when it is first imported, and a script that says `BeautifulSoup(html, "lxml")` has no `import lxml` line to go by.
+- **`requests`** works, but inside an extension every request it makes carries your cookies for the site it goes to, on any site, and it has no setting to turn that off (the browser adds them, not `requests`). `page.fetch` sends cookies only to the site the script runs on unless you ask for more, which is why PyMonkey comes with that and not with `requests`.
+
+### What packages cost, and why the default set is small
+
+Measured in Chrome 145 on an Apple-silicon Mac with Pyodide 314.0.7 (Python 3.14), median of three runs. Size is the download, with the packages it depends on. Load is unpacking the package; first import is Python's `import` after that; memory is how much Python's memory grew by both. For scale: Python itself starts in about 2 seconds and is 13.5 MB of the extension.
+
+| Package | Size | Load | First import | Memory | |
+|---|---|---|---|---|---|
+| beautifulsoup4 | 189 KB | 120 ms | 277 ms | 3.7 MB | **included, loaded at startup** |
+| python-dateutil | 241 KB | 117 ms | 84 ms | 1.9 MB | **included** |
+| tzdata | 349 KB | 181 ms | 58 ms | 2.2 MB | **included** |
+| regex | 203 KB | 121 ms | 64 ms | 5.6 MB | The standard library's `re` covers most needs |
+| pyyaml | 113 KB | 121 ms | 75 ms | 1.6 MB | Rarely needed on web pages, where data is JSON |
+| cssselect | 19 KB | 109 ms | 30 ms | 1.8 MB | Only useful together with lxml |
+| html5lib | 135 KB | 138 ms | 415 ms | 3.9 MB | Would have to be loaded at startup (see above) |
+| requests | 465 KB | 133 ms | 749 ms | 7.5 MB | Cookies (see above) |
+| pytz | 510 KB | 183 ms | 16 ms | 2.0 MB | `zoneinfo` replaces it |
+| pillow | 1.0 MB | 176 ms | 62 ms | 4.8 MB | Images are a special interest |
+| lxml | 2.1 MB | 210 ms | 117 ms | 7.1 MB | Faster parsing and XPath, but large |
+| numpy | 3.0 MB | 288 ms | 452 ms | 11.5 MB | Size |
+| pandas | 7.9 MB | 621 ms | 2,514 ms | 44.9 MB | Would grow the extension by more than half, and takes 2.5 seconds to import |
+
+The decision: only BeautifulSoup is loaded at startup, because every script pays for what is loaded there. Because loading on first import makes a bundled package free until it is used, the only cost of including one is the size of the extension, so the default set holds the packages that fill a gap most scrapers run into (dates and time zones) and are small. The standard library already has `csv`, `json`, `re`, `sqlite3`, `datetime`, `statistics` and `xml`. The big packages are one line away for those who want them. Not in Pyodide's list at all, so not available: `openpyxl`, `xlsxwriter`, `tabulate`, `parsel`, `selectolax`, `dateparser`, `rapidfuzz`.
 
 ## How it works
 
@@ -162,7 +217,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts
