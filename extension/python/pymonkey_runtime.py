@@ -7,8 +7,9 @@ imports, so it also runs under normal CPython -- see tests/test_runtime.py.
 How a script sees the page:
   * READ:  the page's HTML is snapshotted once and handed to Python.
            `page.soup` is a BeautifulSoup tree of that snapshot.
-  * WRITE: a small set of async primitives (`await page.click(...)`) that
-           round-trip to the real page through the extension.
+  * WRITE: a small set of primitives (`page.click(...)`) that round-trip to
+           the real page through the extension. Each call returns when the
+           page has done it, so no `await` is needed.
 """
 
 import ast
@@ -17,6 +18,16 @@ import json
 import traceback
 
 SCRIPT_FILENAME = "<pymonkey script>"
+
+# The methods of `page` that change the real page.
+WRITE_METHODS = frozenset(
+    ["click", "fill", "set_text", "set_html", "set_attr", "set_style", "insert_html", "remove", "wait_for", "refresh"]
+)
+
+AWAIT_HINT = (
+    "\nNote: page.click() and the other `page` methods that change the page finish before they return,\n"
+    "so they are called without `await` and cannot be passed to asyncio.gather() and the like.\n"
+)
 
 
 class PageError(Exception):
@@ -52,58 +63,80 @@ class Page:
         """Shortcut for page.soup.select_one(css)."""
         return self.soup.select_one(css)
 
-    # ---- writing (async, each call is one round trip to the real page) ----
+    # ---- writing (each call is one round trip to the real page) ----
 
-    async def _dom(self, op, **args):
-        reply = json.loads(await self._dom_call(op, json.dumps(args)))
+    def _dom(self, op, **args):
+        reply = json.loads(self._dom_call(op, json.dumps(args)))
         if not reply.get("ok"):
             raise PageError(reply.get("error", f"{op} failed"))
         return reply.get("value")
 
-    async def click(self, selector):
+    def click(self, selector):
         """Click the first element matching `selector`."""
-        return await self._dom("click", selector=selector)
+        return self._dom("click", selector=selector)
 
-    async def fill(self, selector, value):
+    def fill(self, selector, value):
         """Type `value` into the first matching input/textarea/select."""
-        return await self._dom("fill", selector=selector, value=value)
+        return self._dom("fill", selector=selector, value=value)
 
-    async def set_text(self, selector, text):
+    def set_text(self, selector, text):
         """Set the text of every matching element. Returns how many changed."""
-        return await self._dom("set_text", selector=selector, text=text)
+        return self._dom("set_text", selector=selector, text=text)
 
-    async def set_html(self, selector, html):
+    def set_html(self, selector, html):
         """Replace the inner HTML of every matching element."""
-        return await self._dom("set_html", selector=selector, html=html)
+        return self._dom("set_html", selector=selector, html=html)
 
-    async def set_attr(self, selector, name, value):
+    def set_attr(self, selector, name, value):
         """Set an attribute on every matching element."""
-        return await self._dom("set_attr", selector=selector, name=name, value=value)
+        return self._dom("set_attr", selector=selector, name=name, value=value)
 
-    async def set_style(self, selector, css):
+    def set_style(self, selector, css):
         """Add inline CSS (e.g. "background: yellow") to every matching element."""
-        return await self._dom("set_style", selector=selector, css=css)
+        return self._dom("set_style", selector=selector, css=css)
 
-    async def insert_html(self, selector, html, position="beforeend"):
+    def insert_html(self, selector, html, position="beforeend"):
         """Insert HTML relative to the first match.
 
         position: beforebegin | afterbegin | beforeend | afterend
         """
-        return await self._dom("insert_html", selector=selector, html=html, position=position)
+        return self._dom("insert_html", selector=selector, html=html, position=position)
 
-    async def remove(self, selector):
+    def remove(self, selector):
         """Remove every matching element. Returns how many were removed."""
-        return await self._dom("remove", selector=selector)
+        return self._dom("remove", selector=selector)
 
-    async def wait_for(self, selector, timeout=10.0):
+    def wait_for(self, selector, timeout=10.0):
         """Wait until an element matching `selector` exists on the real page."""
-        return await self._dom("wait_for", selector=selector, timeout=timeout)
+        return self._dom("wait_for", selector=selector, timeout=timeout)
 
-    async def refresh(self):
+    def refresh(self):
         """Re-snapshot the page (call after the page changed and you want to re-read it)."""
-        info = await self._dom("snapshot")
+        info = self._dom("snapshot")
         self.url, self.title, self.html = info["url"], info["title"], info["html"]
         self._soup = None
+
+
+class _DropAwaitOnWrites(ast.NodeTransformer):
+    """Rewrite `await page.click(...)` to `page.click(...)`.
+
+    The write methods used to be coroutines, so older scripts put `await` in
+    front of them. They are plain methods now and `await` on their result
+    would be a TypeError; dropping it keeps those scripts working.
+    Only the direct form is recognized: `await page.<write method>(...)`.
+    """
+
+    def visit_Await(self, node):
+        self.generic_visit(node)  # rewrite anything nested inside first
+        call = node.value
+        is_page_write = (
+            isinstance(call, ast.Call)
+            and isinstance(call.func, ast.Attribute)
+            and call.func.attr in WRITE_METHODS
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "page"
+        )
+        return call if is_page_write else node
 
 
 async def run(code, page_json, dom_call):
@@ -111,7 +144,8 @@ async def run(code, page_json, dom_call):
 
     code       -- the script source
     page_json  -- JSON string {url, title, html}
-    dom_call   -- async callable (op: str, args_json: str) -> JSON string
+    dom_call   -- callable (op: str, args_json: str) -> JSON string. It blocks
+                  until the page has answered (see makeSync in pyodide-worker.js).
     """
     output = []
 
@@ -127,14 +161,19 @@ async def run(code, page_json, dom_call):
 
     error = None
     try:
-        # PyCF_ALLOW_TOP_LEVEL_AWAIT lets scripts write `await page.click(...)`
+        tree = _DropAwaitOnWrites().visit(ast.parse(code, SCRIPT_FILENAME, "exec"))
+        # PyCF_ALLOW_TOP_LEVEL_AWAIT lets scripts write `await asyncio.sleep(1)`
         # at the top level, without wrapping everything in `async def main()`.
-        compiled = compile(code, SCRIPT_FILENAME, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        compiled = compile(tree, SCRIPT_FILENAME, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
         result = eval(compiled, namespace)
         if inspect.isawaitable(result):
             await result
-    except BaseException:  # includes SystemExit etc. -- a script must never kill the runtime
+    except BaseException as exc:  # includes SystemExit etc. -- a script must never kill the runtime
         error = _format_error()
+        # Python's own message for awaiting a finished write ("'int' object can't
+        # be awaited") does not say what to do about it.
+        if isinstance(exc, TypeError) and "await" in str(exc):
+            error += AWAIT_HINT
 
     return json.dumps({"ok": error is None, "stdout": "".join(output), "error": error})
 

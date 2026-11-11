@@ -10,15 +10,15 @@ for link in page.select("a[href]"):
     print(link.get_text(strip=True), "->", link["href"])
 
 # Change the page
-await page.set_style("h1", "background: yellow")
-await page.click("button.load-more")
+page.set_style("h1", "background: yellow")
+page.click("button.load-more")
 ```
 
 > **Status:** early skeleton. The full loop works (write a script, run it on a page, auto-run on matching URLs), but expect rough edges. Chrome/Chromium only for now.
 
 ## Quick start
 
-Requires [Node.js](https://nodejs.org) 22+ (only to fetch Pyodide; the extension itself has no build step).
+Requires Chrome 137 or newer, and [Node.js](https://nodejs.org) 22+ (only to fetch Pyodide; the extension itself has no build step).
 
 ```bash
 git clone https://github.com/Ohr-Co/PyMonkey.git
@@ -37,7 +37,7 @@ After changing extension code, press the reload icon on the PyMonkey card in `ch
 
 ## Writing scripts
 
-Every script gets a `page` object. Reading is instant and local; writing talks to the real page, so it uses `await`.
+Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it.
 
 | Read (works on a snapshot of the page) | |
 |---|---|
@@ -47,16 +47,18 @@ Every script gets a `page` object. Reading is instant and local; writing talks t
 
 | Write (each call changes the real page) | |
 |---|---|
-| `await page.click(sel)` | Click the first match |
-| `await page.fill(sel, value)` | Type into an input |
-| `await page.set_text(sel, text)` | Set text of every match |
-| `await page.set_html(sel, html)` | Set inner HTML of every match |
-| `await page.set_attr(sel, name, value)` | Set an attribute on every match |
-| `await page.set_style(sel, css)` | Add inline CSS to every match |
-| `await page.insert_html(sel, html, position="beforeend")` | Insert HTML next to the first match |
-| `await page.remove(sel)` | Remove every match |
-| `await page.wait_for(sel, timeout=10)` | Wait for an element to appear |
-| `await page.refresh()` | Re-snapshot after the page changed |
+| `page.click(sel)` | Click the first match |
+| `page.fill(sel, value)` | Type into an input |
+| `page.set_text(sel, text)` | Set text of every match |
+| `page.set_html(sel, html)` | Set inner HTML of every match |
+| `page.set_attr(sel, name, value)` | Set an attribute on every match |
+| `page.set_style(sel, css)` | Add inline CSS to every match |
+| `page.insert_html(sel, html, position="beforeend")` | Insert HTML next to the first match |
+| `page.remove(sel)` | Remove every match |
+| `page.wait_for(sel, timeout=10)` | Wait for an element to appear |
+| `page.refresh()` | Re-snapshot after the page changed |
+
+Write calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
 
@@ -88,7 +90,7 @@ An extension is several isolated contexts that can only pass messages to each ot
 
 1. The background worker forwards your code to the offscreen document, which keeps Pyodide loaded in a web worker and runs scripts one at a time, in the order they were started.
 2. When a script's turn comes, the content script snapshots the page's HTML.
-3. Python reads the snapshot with BeautifulSoup. Each `await page.something()` travels back through the same chain to the content script, which performs it on the real page.
+3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page.
 4. When the script ends, its output is sent to the panel as a new message.
 
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.

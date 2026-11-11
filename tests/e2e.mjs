@@ -62,7 +62,8 @@ try {
   assert.deepEqual(result, { ok: true, stdout: "Test page\n['/one', '/two']\n", error: null });
   console.log("ok  read page with BeautifulSoup");
 
-  // 2. Write: DOM primitives round-trip to the real page
+  // 2. Write: DOM primitives round-trip to the real page. This script is written
+  //    the old way, with `await` in front of every write: it must keep working.
   result = await run(
     `await page.set_text("h1", "Changed by Python")\nawait page.fill("#q", "typed")\nawait page.click("#btn")\n` +
       `await page.refresh()\nprint(page.title)`,
@@ -72,6 +73,39 @@ try {
   assert.equal(await page.$eval("h1", (el) => el.textContent), "Changed by Python");
   assert.equal(await page.$eval("#q", (el) => el.value), "typed");
   console.log("ok  edit page through DOM primitives");
+
+  //    The same without `await`, through all ten write methods. Each call must
+  //    have happened on the real page by the time it returns.
+  result = await run(
+    [
+      `print(page.set_text("h1", "No await"))`,
+      `page.fill("#q", "typed again")`,
+      `page.set_attr("h1", "data-sync", "yes")`,
+      `page.set_style("h1", "color: rgb(1, 2, 3)")`,
+      `page.insert_html("body", "<p id='new'>new</p><i class='tmp'>1</i><i class='tmp'>2</i>")`,
+      `page.wait_for("#new", timeout=2)`,
+      `page.set_html("#new", "<b>bold</b>")`,
+      `print(page.remove(".tmp"))`,
+      `page.set_text("title", "not clicked yet")`,
+      `page.click("#btn")`,
+      `page.refresh()`,
+      `print(page.title, page.select_one("#new b").text, len(page.select(".tmp")))`,
+    ].join("\n"),
+  );
+  assert.deepEqual(result, { ok: true, stdout: "1\n2\nclicked bold 0\n", error: null });
+  assert.deepEqual(
+    await page.$eval("h1", (el) => [el.textContent, el.dataset.sync, el.style.color]),
+    ["No await", "yes", "rgb(1, 2, 3)"],
+  );
+  assert.equal(await page.$eval("#q", (el) => el.value), "typed again");
+  console.log("ok  writes work without await");
+
+  //    An await the runtime cannot see through fails, and says what to do.
+  result = await run(`p = page\nawait p.set_text("h1", "Indirect")`);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /TypeError/);
+  assert.match(result.error, /called without `await`/);
+  console.log("ok  a leftover await fails with a clear message");
 
   // 3. Errors come back as Python tracebacks
   result = await run(`await page.click("#missing")`);
