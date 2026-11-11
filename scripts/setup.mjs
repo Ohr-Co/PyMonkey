@@ -1,9 +1,11 @@
-// Copies the Pyodide runtime into extension/vendor/pyodide and downloads the
-// Python packages PyMonkey bundles. Run with: npm run setup
+// Puts the third-party code PyMonkey needs into extension/vendor. Run with: npm run setup
+//   1. copies the Pyodide runtime into extension/vendor/pyodide and downloads
+//      the Python packages PyMonkey bundles
+//   2. bundles the CodeMirror code editor into extension/vendor/codemirror
 //
 // Why: Manifest V3 extensions may not load code from the network at runtime,
-// so Pyodide and every package wheel must ship inside the extension folder.
-// The folder is gitignored (it is ~15 MB of binaries).
+// so Pyodide, every package wheel and the editor must ship inside the
+// extension folder. The folder is gitignored (it is ~15 MB, mostly binaries).
 //
 // It also writes packages.json, which tells the extension which `import`
 // needs which bundled package (so it can be loaded the first time a script
@@ -81,5 +83,40 @@ for (const file of await readdir(dest)) {
 
 await writeFile(join(dest, "packages.json"), JSON.stringify(buildIndex(wanted, lock), null, 1));
 console.log(`  wrote     packages.json (${wanted.length} packages bundled)`);
+
+// ---------- the code editor ----------
+//
+// This is the one place where PyMonkey uses a bundler, and only for
+// third-party code: see scripts/codemirror-entry.mjs for why. PyMonkey's own
+// files are loaded by Chrome exactly as they are in the repository.
+const { build } = await import("esbuild");
+const editorDest = join(root, "extension", "vendor", "codemirror");
+const bundle = await build({
+  entryPoints: [join(root, "scripts", "codemirror-entry.mjs")],
+  outfile: join(editorDest, "codemirror.js"),
+  bundle: true, // follow the imports and put everything in one file
+  format: "esm", // ...that is itself a module the panel can `import`
+  minify: true,
+  legalComments: "none", // the licenses are written out in full below
+  metafile: true, // report which files went in
+});
+
+// The licenses of what was bundled (all MIT) ask to be passed on with it.
+// A bundled file's path looks like node_modules/@codemirror/view/dist/index.js;
+// its package folder is the part up to and including the package's name.
+const packageFolders = new Set(
+  Object.keys(bundle.metafile.inputs)
+    .map((file) => file.match(/^node_modules\/(@[^/]+\/)?[^/]+/)?.[0])
+    .filter(Boolean),
+);
+let licenses = "codemirror.js in this folder contains the following packages.\n";
+for (const folder of [...packageFolders].sort()) {
+  const { name, version } = JSON.parse(await readFile(join(root, folder, "package.json"), "utf8"));
+  const license = await readFile(join(root, folder, "LICENSE"), "utf8");
+  licenses += `\n${"=".repeat(70)}\n${name} ${version}\n${"=".repeat(70)}\n\n${license.trim()}\n`;
+}
+await writeFile(join(editorDest, "LICENSES.txt"), licenses);
+const { bytes } = Object.values(bundle.metafile.outputs)[0];
+console.log(`CodeMirror bundled into extension/vendor/codemirror (${Math.round(bytes / 1000)} KB, ${packageFolders.size} packages)`);
 
 console.log("Done. Load the `extension` folder at chrome://extensions (Developer mode -> Load unpacked).");

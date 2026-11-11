@@ -11,6 +11,13 @@
     "test:e2e": "node tests/e2e.mjs"
   },
   "devDependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15",
+    "@lezer/highlight": "1.2.5",
+    "esbuild": "0.28.2",
     "puppeteer-core": "^25.17.0",
     "pyodide": "314.0.7"
   }

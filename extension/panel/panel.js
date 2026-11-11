@@ -1,6 +1,8 @@
-// Side panel: the script editor. A plain textarea for v1.
+// Side panel: the script editor.
 // Talks only to the background service worker (target: "background").
 
+import { createEditor } from "./editor.js";
+import { formToRestore, loadDraft, saveDraft, scriptFields } from "../lib/draft.js";
 import { startRun } from "../lib/run-client.js";
 import { describeLastRun, isLastRunKey } from "../lib/last-run.js";
 import { getScripts, getLastRuns, saveScript, deleteScript, markLastRunSeen } from "../lib/storage.js";
@@ -9,7 +11,7 @@ import { timeoutSeconds } from "../lib/timeout.js";
 const $ = (id) => document.getElementById(id);
 const els = {
   status: $("status"), list: $("script-list"), name: $("name"), match: $("match"),
-  enabled: $("enabled"), timeout: $("timeout"), code: $("code"), output: $("output"),
+  enabled: $("enabled"), timeout: $("timeout"), output: $("output"),
   run: $("run"), stop: $("stop"), save: $("save"), del: $("delete"), newBtn: $("new"),
   lastRun: $("last-run"), lastRunSummary: $("last-run-summary"),
   lastRunUrl: $("last-run-url"), lastRunOutput: $("last-run-output"),
@@ -27,6 +29,9 @@ for link in page.select("a[href]")[:10]:
 let currentId = null; // id of the script being edited, or null for an unsaved one
 let currentRun = null; // the run started with the Run button, while it is in flight
 let shownLastRun = null; // which last run the panel is showing ("<script id>:<time>")
+let savedScripts = []; // the saved scripts, as of the last refreshList()
+
+const editor = createEditor({ parent: $("code"), onChange: rememberDraft });
 
 const toBackground = (message) => chrome.runtime.sendMessage({ ...message, target: "background" });
 
@@ -36,13 +41,33 @@ function showOutput(result) {
   els.output.classList.toggle("error", !result.ok);
 }
 
+// The state of the panel's fields: the script as it is being edited.
+function readForm() {
+  return {
+    id: currentId,
+    name: els.name.value,
+    match: els.match.value,
+    enabled: els.enabled.checked,
+    timeout: els.timeout.value,
+    code: editor.getText(),
+  };
+}
+
+// Keep a copy of the fields, so that they are still there when the panel is
+// closed and opened again (see lib/draft.js). Called on every change.
+function rememberDraft() {
+  saveDraft(readForm(), savedScripts.find((s) => s.id === currentId));
+}
+
+// Show a script (or a restored draft, or with null a new script) in the fields.
 function loadIntoEditor(script) {
   currentId = script?.id ?? null;
   els.name.value = script?.name ?? "";
   els.match.value = script?.match ?? "";
   els.enabled.checked = script?.enabled ?? true;
   els.timeout.value = timeoutSeconds(script?.timeout);
-  els.code.value = script?.code ?? STARTER;
+  editor.setText(script?.code ?? STARTER);
+  rememberDraft();
   showLastRun();
 }
 
@@ -69,6 +94,7 @@ async function showLastRun() {
 async function refreshList(selectId = currentId) {
   const scripts = await getScripts();
   const lastRuns = await getLastRuns();
+  savedScripts = scripts;
   // A script whose last automatic run failed is marked in the list.
   const label = (s) => (s.name || "Untitled") + (lastRuns[s.id]?.ok === false ? " (failed)" : "");
   els.list.replaceChildren(
@@ -89,7 +115,7 @@ els.run.addEventListener("click", async () => {
   els.stop.hidden = false;
   els.output.classList.remove("error");
   els.output.textContent = "Running…";
-  currentRun = startRun(tab.id, els.code.value, {
+  currentRun = startRun(tab.id, editor.getText(), {
     timeout: timeoutSeconds(els.timeout.value),
     scriptId: currentId, // null for an unsaved script, which has no page.store
   });
@@ -103,16 +129,10 @@ els.run.addEventListener("click", async () => {
 els.stop.addEventListener("click", () => currentRun?.stop());
 
 els.save.addEventListener("click", async () => {
-  const saved = await saveScript({
-    id: currentId ?? undefined,
-    name: els.name.value.trim() || "Untitled",
-    match: els.match.value.trim(),
-    enabled: els.enabled.checked,
-    timeout: timeoutSeconds(els.timeout.value),
-    code: els.code.value,
-  });
+  const saved = await saveScript({ id: currentId ?? undefined, ...scriptFields(readForm()) });
   currentId = saved.id;
   await refreshList();
+  rememberDraft(); // the draft now belongs to a saved script, and has no changes
   await showLastRun();
 });
 
@@ -128,16 +148,12 @@ els.newBtn.addEventListener("click", () => {
 });
 
 els.list.addEventListener("change", async () => {
-  const scripts = await getScripts();
-  loadIntoEditor(scripts.find((s) => s.id === els.list.value) ?? null);
+  savedScripts = await getScripts();
+  loadIntoEditor(savedScripts.find((s) => s.id === els.list.value) ?? null);
 });
 
-// Tab key indents instead of leaving the textarea (this is Python, after all).
-els.code.addEventListener("keydown", (e) => {
-  if (e.key !== "Tab") return;
-  e.preventDefault();
-  els.code.setRangeText("    ", els.code.selectionStart, els.code.selectionEnd, "end");
-});
+// Typing in any field changes the draft. (The editor reports its own changes: see createEditor above.)
+for (const field of [els.name, els.match, els.enabled, els.timeout]) field.addEventListener("input", rememberDraft);
 
 // Results of scripts that auto-ran while the panel is open.
 // (Runs started with the Run button are handled by startRun above.)
@@ -155,8 +171,12 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 // ---------- startup ----------
 
-loadIntoEditor(null);
-refreshList();
+// Open the way the panel was left: with the script that was being edited,
+// including text that was never saved.
+refreshList(null).then((scripts) => {
+  loadIntoEditor(formToRestore(loadDraft(), scripts));
+  els.list.value = currentId ?? "";
+});
 
 // Warm start: begin loading Python as soon as the panel opens, so the cost is
 // already paid by the time the user clicks Run.
