@@ -21,15 +21,46 @@ PAGE = {
 }
 
 
-def run(code, replies=None):
-    """Run a script against a fake page. Returns (result, list of DOM calls made)."""
+def fake_store(saved, op, args):
+    """What the extension answers to a `page.store` operation (see lib/script-store.js)."""
+    key = args.get("key")
+    if op == "get":
+        return {"exists": True, "value": saved[key]} if key in saved else {"exists": False}
+    if op == "set":
+        saved[key] = args["value"]
+    elif op == "delete":
+        return saved.pop(key, MISSING) is not MISSING
+    elif op == "keys":
+        return sorted(saved)
+    elif op == "clear":
+        saved.clear()
+    return None
+
+
+MISSING = object()
+
+
+def run(code, replies=None, store=None):
+    """Run a script against a fake page. Returns (result, list of DOM calls made).
+
+    `replies` overrides the answer to a DOM operation. `store` is the dict
+    behind `page.store` (each value as JSON text); pass the same one to several
+    runs to see what a script finds on its next run, or None for a script that
+    was never saved.
+    """
     calls = []
 
-    def fake_dom_call(op, args_json):
-        calls.append((op, json.loads(args_json)))
+    def fake_host_call(service, op, args_json):
+        args = json.loads(args_json)
+        if service == "store":
+            if store is None:
+                return json.dumps({"ok": False, "error": "Save this script, then run it again."})
+            return json.dumps({"ok": True, "value": fake_store(store, op, args)})
+        assert service == "dom"
+        calls.append((op, args))
         return json.dumps((replies or {}).get(op, {"ok": True, "value": 1}))
 
-    result = asyncio.run(pymonkey_runtime.run(code, json.dumps(PAGE), fake_dom_call))
+    result = asyncio.run(pymonkey_runtime.run(code, json.dumps(PAGE), fake_host_call))
     return json.loads(result), calls
 
 
@@ -161,3 +192,89 @@ def test_refresh_replaces_snapshot():
         {"snapshot": {"ok": True, "value": new}},
     )
     assert result["stdout"] == "Two new\n"
+
+
+# ---------- page.store ----------
+
+
+def test_store_remembers_values_between_runs():
+    store = {}
+    result, calls = run("page.store.set('visits', 1)", store=store)
+    assert result["ok"] and calls == []  # the store is not the page: no DOM calls
+    result, _ = run("n = page.store.get('visits')\npage.store.set('visits', n + 1)\nprint(n)", store=store)
+    assert result["stdout"] == "1\n"
+    assert store == {"visits": "2"}  # kept as JSON text
+
+
+def test_store_get_default():
+    result, _ = run(
+        "print(page.store.get('nope'), page.store.get('nope', 0), page.store.get('nope', default=[]))", store={}
+    )
+    assert result["stdout"] == "None 0 []\n"
+
+
+def test_store_distinguishes_a_saved_none_from_nothing_saved():
+    result, _ = run("page.store.set('k', None)\nprint(page.store.get('k', 'default'))", store={})
+    assert result["stdout"] == "None\n"
+
+
+def test_store_values_can_be_any_json_type():
+    code = (
+        "value = {'seen': ['a', 'b'], 'count': 2, 'ratio': 0.5, 'done': False, 'note': None, 'nested': {'x': [1, {'y': 'z'}]}}\n"
+        "page.store.set('state', value)\n"
+        "print(page.store.get('state') == value)\n"
+        "for simple in ['text', 7, 1.5, True, None, [1, 2], {}]:\n"
+        "    page.store.set('simple', simple)\n"
+        "    assert page.store.get('simple') == simple, simple\n"
+    )
+    result, _ = run(code, store={})
+    assert result == {"ok": True, "stdout": "True\n", "error": None}
+
+
+def test_store_values_come_back_exactly():
+    # Browser storage on its own would sort the dict's keys and round the big number.
+    code = (
+        "page.store.set('k', {'zebra': 1, 'apple': 2, 'big': 2**70})\n"
+        "value = page.store.get('k')\n"
+        "print(list(value), value['big'] == 2**70)\n"
+    )
+    result, _ = run(code, store={})
+    assert result["stdout"] == "['zebra', 'apple', 'big'] True\n"
+
+
+def test_store_delete_keys_and_clear():
+    code = (
+        "page.store.set('b', 1)\npage.store.set('a', 2)\n"
+        "print(page.store.keys())\n"
+        "print(page.store.delete('a'), page.store.delete('a'), page.store.keys())\n"
+        "page.store.clear()\nprint(page.store.keys())\n"
+    )
+    store = {}
+    result, _ = run(code, store=store)
+    assert result["stdout"] == "['a', 'b']\nTrue False ['b']\n[]\n"
+    assert store == {}
+
+
+def test_store_rejects_values_json_cannot_hold():
+    result, _ = run("page.store.set('k', {1, 2})", store={})
+    assert "TypeError" in result["error"] and "not JSON serializable" in result["error"]
+    result, _ = run("page.store.set('k', float('nan'))", store={})
+    assert "ValueError" in result["error"]
+
+
+def test_store_keys_must_be_strings():
+    store = {}
+    result, _ = run("page.store.set(1, 'x')", store=store)
+    assert "TypeError: page.store keys must be strings, not int" in result["error"]
+    assert store == {}
+
+
+def test_store_failure_raises_page_error():
+    result, _ = run("page.store.get('k')")  # a script that was never saved has no store
+    assert not result["ok"]
+    assert "PageError: Save this script, then run it again." in result["error"]
+
+
+def test_store_calls_may_be_written_with_await():
+    result, _ = run("await page.store.set('k', 5)\nprint(await page.store.get('k', 0))", store={})
+    assert result == {"ok": True, "stdout": "5\n", "error": None}

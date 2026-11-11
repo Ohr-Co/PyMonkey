@@ -10,6 +10,7 @@ How a script sees the page:
   * WRITE: a small set of primitives (`page.click(...)`) that round-trip to
            the real page through the extension. Each call returns when the
            page has done it, so no `await` is needed.
+  * STORE: `page.store` keeps values between runs, one store per saved script.
 """
 
 import ast
@@ -25,23 +26,75 @@ WRITE_METHODS = frozenset(
 )
 
 AWAIT_HINT = (
-    "\nNote: page.click() and the other `page` methods that change the page finish before they return,\n"
+    "\nNote: page.click(), page.store.get() and the other `page` calls finish before they return,\n"
     "so they are called without `await` and cannot be passed to asyncio.gather() and the like.\n"
 )
 
 
 class PageError(Exception):
-    """A DOM operation failed on the real page (e.g. selector not found)."""
+    """Something asked of the page or the extension failed (e.g. selector not found)."""
+
+
+def _ask(host_call, service, op, args):
+    """One round trip to the extension. Returns the reply's value or raises PageError."""
+    reply = json.loads(host_call(service, op, json.dumps(args, allow_nan=False)))
+    if not reply.get("ok"):
+        raise PageError(reply.get("error", f"{op} failed"))
+    return reply.get("value")
+
+
+class Store:
+    """`page.store`: values a script keeps between runs.
+
+    Every saved script has its own store. It lives in the browser's extension
+    storage, so it is still there after the browser is restarted. Keys are
+    strings; values can be anything JSON can hold (numbers, strings, booleans,
+    None, lists, dicts).
+
+    A value is saved as JSON text, written and read here. The browser's storage
+    would otherwise sort the keys of a dict and round large integers; this way
+    a value comes back exactly as `json.loads(json.dumps(value))` would give it.
+    """
+
+    def __init__(self, host_call):
+        self._host_call = host_call
+
+    def _ask(self, op, **args):
+        if "key" in args and not isinstance(args["key"], str):
+            raise TypeError(f"page.store keys must be strings, not {type(args['key']).__name__}")
+        return _ask(self._host_call, "store", op, args)
+
+    def get(self, key, default=None):
+        """The value saved under `key`, or `default` if nothing was saved."""
+        found = self._ask("get", key=key)
+        return json.loads(found["value"]) if found["exists"] else default
+
+    def set(self, key, value):
+        """Save `value` under `key`, replacing what was there."""
+        self._ask("set", key=key, value=json.dumps(value, allow_nan=False))
+
+    def delete(self, key):
+        """Forget `key`. Returns True if there was something to forget."""
+        return self._ask("delete", key=key)
+
+    def keys(self):
+        """All keys this script has saved, in alphabetical order."""
+        return self._ask("keys")
+
+    def clear(self):
+        """Forget everything this script has saved."""
+        self._ask("clear")
 
 
 class Page:
     """The `page` object available to every script."""
 
-    def __init__(self, info, dom_call):
+    def __init__(self, info, host_call):
         self.url = info.get("url", "")
         self.title = info.get("title", "")
         self.html = info.get("html", "")
-        self._dom_call = dom_call
+        self.store = Store(host_call)
+        self._host_call = host_call
         self._soup = None
 
     # ---- reading (local, synchronous, works on the snapshot) ----
@@ -66,10 +119,7 @@ class Page:
     # ---- writing (each call is one round trip to the real page) ----
 
     def _dom(self, op, **args):
-        reply = json.loads(self._dom_call(op, json.dumps(args)))
-        if not reply.get("ok"):
-            raise PageError(reply.get("error", f"{op} failed"))
-        return reply.get("value")
+        return _ask(self._host_call, "dom", op, args)
 
     def click(self, selector):
         """Click the first element matching `selector`."""
@@ -117,35 +167,38 @@ class Page:
         self._soup = None
 
 
-class _DropAwaitOnWrites(ast.NodeTransformer):
+class _DropAwaitOnPageCalls(ast.NodeTransformer):
     """Rewrite `await page.click(...)` to `page.click(...)`.
 
     The write methods used to be coroutines, so older scripts put `await` in
-    front of them. They are plain methods now and `await` on their result
-    would be a TypeError; dropping it keeps those scripts working.
-    Only the direct form is recognized: `await page.<write method>(...)`.
+    front of them. Nothing on `page` is a coroutine now and `await` on a
+    result would be a TypeError; dropping it keeps those scripts working.
+    Only the direct form is recognized: `await page.<...>(...)`, which
+    includes `await page.store.get(...)`.
     """
 
     def visit_Await(self, node):
         self.generic_visit(node)  # rewrite anything nested inside first
         call = node.value
-        is_page_write = (
-            isinstance(call, ast.Call)
-            and isinstance(call.func, ast.Attribute)
-            and call.func.attr in WRITE_METHODS
-            and isinstance(call.func.value, ast.Name)
-            and call.func.value.id == "page"
-        )
-        return call if is_page_write else node
+        if not isinstance(call, ast.Call):
+            return node
+        # Walk `page.store.get` back to its first name: get -> store -> page.
+        target = call.func
+        while isinstance(target, ast.Attribute):
+            target = target.value
+        is_page_call = isinstance(target, ast.Name) and target.id == "page" and target is not call.func
+        return call if is_page_call else node
 
 
-async def run(code, page_json, dom_call):
+async def run(code, page_json, host_call):
     """Run one user script. Returns a JSON string: {ok, stdout, error}.
 
     code       -- the script source
     page_json  -- JSON string {url, title, html}
-    dom_call   -- callable (op: str, args_json: str) -> JSON string. It blocks
-                  until the page has answered (see makeSync in pyodide-worker.js).
+    host_call  -- callable (service: str, op: str, args_json: str) -> JSON string
+                  {ok, value} or {ok, error}. `service` says who should do it:
+                  "dom" is the page, "store" is the script's saved values. It
+                  blocks until the answer is there (see makeSync in pyodide-worker.js).
     """
     output = []
 
@@ -155,13 +208,13 @@ async def run(code, page_json, dom_call):
     # Each run gets a fresh namespace, so scripts can't see each other's globals.
     namespace = {
         "__name__": "__main__",
-        "page": Page(json.loads(page_json), dom_call),
+        "page": Page(json.loads(page_json), host_call),
         "print": script_print,
     }
 
     error = None
     try:
-        tree = _DropAwaitOnWrites().visit(ast.parse(code, SCRIPT_FILENAME, "exec"))
+        tree = _DropAwaitOnPageCalls().visit(ast.parse(code, SCRIPT_FILENAME, "exec"))
         # PyCF_ALLOW_TOP_LEVEL_AWAIT lets scripts write `await asyncio.sleep(1)`
         # at the top level, without wrapping everything in `async def main()`.
         compiled = compile(tree, SCRIPT_FILENAME, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)

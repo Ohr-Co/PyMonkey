@@ -89,7 +89,10 @@ els.run.addEventListener("click", async () => {
   els.stop.hidden = false;
   els.output.classList.remove("error");
   els.output.textContent = "Running…";
-  currentRun = startRun(tab.id, els.code.value, { timeout: timeoutSeconds(els.timeout.value) });
+  currentRun = startRun(tab.id, els.code.value, {
+    timeout: timeoutSeconds(els.timeout.value),
+    scriptId: currentId, // null for an unsaved script, which has no page.store
+  });
   // `result` always arrives, even if the run was stopped or lost (see lib/run-client.js).
   showOutput(await currentRun.result);
   currentRun = null;

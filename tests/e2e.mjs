@@ -6,8 +6,9 @@
 // --load-extension). Point CHROME_PATH at the binary if it is not found.
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer-core";
@@ -24,11 +25,17 @@ const HTML = `<!doctype html><title>Test page</title>
 const server = http.createServer((_req, res) => res.end(HTML)).listen(0);
 const pageUrl = `http://localhost:${server.address().port}/`;
 
-const browser = await puppeteer.launch({
-  executablePath: chromePath,
-  headless: true,
-  args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
-});
+// The browser's profile folder is ours, so the browser can be closed and
+// started again with everything the extension stored still in place.
+const profilePath = mkdtempSync(join(tmpdir(), "pymonkey-e2e-"));
+const launch = () =>
+  puppeteer.launch({
+    executablePath: chromePath,
+    headless: true,
+    userDataDir: profilePath,
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
+  });
+let browser = await launch();
 
 try {
   const isServiceWorker = (t) => t.type() === "service_worker";
@@ -39,7 +46,7 @@ try {
   await page.goto(pageUrl);
 
   // Drive the extension the same way the side panel does: from an extension page.
-  const panel = await browser.newPage();
+  let panel = await browser.newPage();
   await panel.goto(`chrome-extension://${extensionId}/panel/panel.html`);
 
   // Start a script with the same module the panel uses. The run is left on
@@ -52,8 +59,8 @@ try {
       return window.__run.started;
     }, code, pageUrl, options);
   const finish = () => panel.evaluate(() => window.__run.result);
-  const run = async (code) => {
-    await start(code);
+  const run = async (code, options) => {
+    await start(code, options);
     return finish();
   };
 
@@ -106,6 +113,30 @@ try {
   assert.match(result.error, /TypeError/);
   assert.match(result.error, /called without `await`/);
   console.log("ok  a leftover await fails with a clear message");
+
+  //    page.store: values a script keeps between runs. `scriptId` is what the
+  //    panel sends for a saved script; each one has its own store.
+  result = await run(
+    `page.store.set("seen", {"urls": ["/one"], "count": 1, "ok": True, "none": None})\nprint(page.store.keys())`,
+    { scriptId: "store-a" },
+  );
+  assert.deepEqual(result, { ok: true, stdout: "['seen']\n", error: null });
+  result = await run(`print(page.store.get("seen"))`, { scriptId: "store-a" });
+  assert.equal(result.stdout, "{'urls': ['/one'], 'count': 1, 'ok': True, 'none': None}\n");
+  result = await run(`print(page.store.get("seen", "nothing here"))`, { scriptId: "store-b" });
+  assert.equal(result.stdout, "nothing here\n");
+  //    A script that was never saved has no id, so nowhere to keep values.
+  result = await run(`page.store.set("k", 1)`);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /PageError: page\.store keeps values per saved script/);
+  //    Extension storage is not endless (about 10 MB for everything). A value
+  //    that does not fit is an error in the script, and what was saved stays.
+  result = await run(`page.store.set("big", "x" * 11_000_000)`, { scriptId: "store-a" });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /PageError: .*quota/i);
+  result = await run(`print(page.store.keys())`, { scriptId: "store-a" });
+  assert.equal(result.stdout, "['seen']\n");
+  console.log("ok  page.store keeps values between runs, separately per script");
 
   // 3. Errors come back as Python tracebacks
   result = await run(`await page.click("#missing")`);
@@ -223,6 +254,28 @@ try {
   assert.deepEqual(await panelOutput(), { text: "from the panel: clicked\n", isError: false });
   console.log("ok  panel Run button shows the script's output");
 
+  //    page.store from the panel: an unsaved script is told to save first.
+  //    Once saved, each press of Run finds what the one before left.
+  await pressRun(`runs = page.store.get("runs", 0) + 1\npage.store.set("runs", runs)\nprint("run", runs)`);
+  shown = await panelOutput();
+  assert.match(shown.text, /Save this script, then run it again/);
+  assert.equal(shown.isError, true);
+  await panel.click("#save");
+  await panel.waitForFunction(() => document.getElementById("script-list").value !== "", { timeout: 5_000 });
+  await pressRun();
+  assert.deepEqual(await panelOutput(), { text: "run 1\n", isError: false });
+  await pressRun();
+  assert.deepEqual(await panelOutput(), { text: "run 2\n", isError: false });
+  //    The Delete button takes the script's saved values with it: all that is
+  //    left is what check 2 saved.
+  const storeKeys = () =>
+    panel.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith("store:")));
+  assert.equal((await storeKeys()).length, 2);
+  await panel.click("#delete");
+  await panel.waitForFunction(() => document.getElementById("script-list").options.length === 1, { timeout: 5_000 });
+  assert.deepEqual(await storeKeys(), ["store:store-a"]);
+  console.log("ok  panel: page.store needs a saved script, counts its runs, is deleted with it");
+
   //    Stop: the button appears while a script runs and ends it within a second,
   //    even a script that never gives control back.
   assert.deepEqual([await visible("run"), await visible("stop")], [true, false]);
@@ -256,14 +309,16 @@ try {
 
   // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
   //    one after the other. The first is cut off by its own 1-second time limit;
-  //    the third must see what the second one changed; the fourth prints a lot.
+  //    the second also counts its runs in page.store; the third must see what
+  //    the second one changed; the fourth prints a lot.
   //    The panel is closed first: auto-run must not depend on it.
   await panel.evaluate(async (match) => {
+    const first = `await page.set_attr("body", "data-pymonkey", "ran")\npage.store.set("loads", page.store.get("loads", 0) + 1)`;
     const second = `first = page.select_one("body").get("data-pymonkey")\nawait page.set_attr("body", "data-second", f"saw-{first}")`;
     await chrome.storage.local.set({
       scripts: [
         { id: "t0", name: "stuck", enabled: true, match, timeout: 1, code: `while True: pass` },
-        { id: "t1", name: "auto", enabled: true, match, code: `await page.set_attr("body", "data-pymonkey", "ran")` },
+        { id: "t1", name: "auto", enabled: true, match, code: first },
         { id: "t2", name: "auto 2", enabled: true, match, code: second },
         { id: "t3", name: "chatty", enabled: true, match, code: `print("x" * 300_000)\nprint("the end")` },
       ],
@@ -342,6 +397,11 @@ try {
   await panel2.select("#script-list", "t1");
   await panel2.waitForFunction(() => document.getElementById("name").value === "auto");
   await badgeIs("1"); // looking at another script does not clear it
+  //     An automatic run uses its script's page.store: "auto" has now counted two page loads.
+  await panel2.waitForFunction(
+    async () => (await chrome.storage.local.get("store:t1"))["store:t1"]?.loads === "2",
+    { timeout: 10_000 },
+  );
   await panel2.evaluate(async () => {
     const { deleteScript } = await import("/lib/storage.js");
     await deleteScript("t0");
@@ -349,9 +409,31 @@ try {
   await badgeIs("");
   assert.deepEqual(await panel2.evaluate(() => chrome.storage.local.get("lastRun:t0")), {});
   console.log("ok  badge returns on a new failure, a deleted script takes its last run along");
+  console.log("ok  automatic runs keep their own page.store between page loads");
+
+  // 11. page.store survives a browser restart: close the browser, start it
+  //     again on the same profile, and read what check 2 saved.
+  await browser.close();
+  browser = await launch();
+  const restarted = await browser.waitForTarget(isServiceWorker);
+  assert.equal(new URL(restarted.url()).host, extensionId);
+  await (await browser.newPage()).goto(pageUrl);
+  panel = await browser.newPage();
+  await panel.goto(`chrome-extension://${extensionId}/panel/panel.html`);
+  result = await run(`print(page.store.get("seen")["urls"])`, { scriptId: "store-a" });
+  assert.deepEqual(result, { ok: true, stdout: "['/one']\n", error: null });
+  //     Deleting a script deletes what it saved.
+  await panel.evaluate(async () => {
+    const { deleteScript } = await import("/lib/storage.js");
+    await deleteScript("store-a");
+  });
+  result = await run(`print(page.store.get("seen", "gone"))`, { scriptId: "store-a" });
+  assert.equal(result.stdout, "gone\n");
+  console.log("ok  page.store survives a browser restart, and goes when its script is deleted");
 
   console.log("\nAll end-to-end checks passed.");
 } finally {
   await browser.close();
   server.close();
+  rmSync(profilePath, { recursive: true, force: true });
 }

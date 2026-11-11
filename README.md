@@ -37,7 +37,7 @@ After changing extension code, press the reload icon on the PyMonkey card in `ch
 
 ## Writing scripts
 
-Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it.
+Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it. `page.store` remembers values from one run to the next.
 
 | Read (works on a snapshot of the page) | |
 |---|---|
@@ -58,7 +58,24 @@ Every script gets a `page` object. Reading is instant and works on a local copy 
 | `page.wait_for(sel, timeout=10)` | Wait for an element to appear |
 | `page.refresh()` | Re-snapshot after the page changed |
 
-Write calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
+| Remember (`page.store`, kept between runs) | |
+|---|---|
+| `page.store.get(key, default=None)` | The value saved under `key`, or `default` |
+| `page.store.set(key, value)` | Save a value |
+| `page.store.delete(key)` | Forget one key; `True` if it was there |
+| `page.store.keys()` | The saved keys, in alphabetical order |
+| `page.store.clear()` | Forget everything this script saved |
+
+```python
+seen = page.store.get("seen", [])
+new = [a["href"] for a in page.select("a[href]") if a["href"] not in seen]
+print(len(new), "links I have not seen before")
+page.store.set("seen", seen + new)
+```
+
+Each saved script has its own store, which other scripts cannot read. It is kept in the browser's extension storage, so it is still there after Chrome restarts, and it is deleted together with the script. Keys are strings. Values can be anything JSON can hold (numbers, strings, booleans, `None`, lists, dicts) and come back the way `json.loads(json.dumps(value))` would return them, so a tuple comes back as a list. A script that has not been saved yet has no store: save it first. Chrome gives the extension about 10 MB for all scripts and everything they save; a value that does not fit raises `PageError` and what was saved before stays.
+
+Write and store calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
 
@@ -90,7 +107,7 @@ An extension is several isolated contexts that can only pass messages to each ot
 
 1. The background worker forwards your code to the offscreen document, which keeps Pyodide loaded in a web worker and runs scripts one at a time, in the order they were started.
 2. When a script's turn comes, the content script snapshots the page's HTML.
-3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page.
+3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page. `page.store` calls take the same road as far as the background worker, which reads and writes the extension's storage.
 4. When the script ends, its output is sent to the panel as a new message.
 
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.
@@ -102,13 +119,13 @@ For the same reason the panel never holds one request open for the length of a r
 ```
 extension/
   manifest.json
-  background.js              message router, offscreen lifecycle, auto-run matching
+  background.js              message router, offscreen lifecycle, auto-run matching, storage
   content.js                 page snapshot + DOM primitives
   offscreen/                 hidden page that owns the Python worker
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, script and last-run storage, run queue and run client, time limit
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts
