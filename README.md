@@ -91,6 +91,7 @@ Pyodide lives in an offscreen document because Chrome shuts the background worke
 ```
 extension/
   manifest.json
+  icons/                     the PyMonkey mark at 16, 32, 48 and 128 px (toolbar, extensions page)
   background.js              message router, offscreen lifecycle, auto-run matching
   content.js                 page snapshot + DOM primitives
   offscreen/                 hidden page that owns the Python worker
