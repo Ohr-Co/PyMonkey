@@ -1,6 +1,7 @@
 // Side panel: the script editor. A plain textarea for v1.
 // Talks only to the background service worker (target: "background").
 
+import { startRun } from "../lib/run-client.js";
 import { getScripts, saveScript, deleteScript } from "../lib/storage.js";
 
 const $ = (id) => document.getElementById(id);
@@ -55,13 +56,9 @@ els.run.addEventListener("click", async () => {
   els.run.disabled = true;
   els.output.classList.remove("error");
   els.output.textContent = "Running…";
-  try {
-    showOutput(await toBackground({ type: "run-in-tab", tabId: tab.id, code: els.code.value }));
-  } catch (err) {
-    showOutput({ ok: false, error: String(err?.message ?? err) });
-  } finally {
-    els.run.disabled = false;
-  }
+  // `result` always arrives, even if the run was lost (see lib/run-client.js).
+  showOutput(await startRun(tab.id, els.code.value).result);
+  els.run.disabled = false;
 });
 
 els.save.addEventListener("click", async () => {
@@ -100,9 +97,10 @@ els.code.addEventListener("keydown", (e) => {
 });
 
 // Results of scripts that auto-ran while the panel is open.
+// (Runs started with the Run button are handled by startRun above.)
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg?.target !== "panel" || msg.type !== "run-finished") return;
-  showOutput({ ...msg.result, stdout: `[auto-run: ${msg.name}]\n${msg.result.stdout}` });
+  if (msg?.target !== "panel" || msg.type !== "run-finished" || !msg.meta?.auto) return;
+  showOutput({ ...msg.result, stdout: `[auto-run: ${msg.meta.name}]\n${msg.result.stdout}` });
 });
 
 // ---------- startup ----------

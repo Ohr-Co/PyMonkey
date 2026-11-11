@@ -62,28 +62,50 @@ async function sendToTab(tabId, message) {
 }
 
 // ---------- running a script ----------
+//
+// A script can outlive this service worker: Chrome stops it after ~30s idle,
+// and after 5 minutes on a single request no matter what. A reply that is
+// still pending at that moment is dropped. So a run is NOT one request that
+// waits for its answer. It is three short messages:
+//
+//   1. start   panel -> background -> offscreen       answered at once with { ok: true }
+//   2. finish  offscreen -> background -> panel       "run-finished", a new message that
+//                                                     wakes this worker up if it was stopped
+//   3. check   panel -> background -> offscreen       "run-status", asked every few seconds
+//
+// The offscreen document remembers recent results, so step 3 recovers a
+// "run-finished" that nobody heard, and reports a run that no longer exists
+// as lost instead of leaving the panel waiting (see lib/run-client.js).
+//
+// Everything known about a run (its id, which script, which page) travels in
+// the messages as `runId` and `meta` and is kept by the offscreen document.
+// Nothing about it is stored here.
 
-async function runInTab(tabId, code) {
+async function startRun(tabId, code, runId, meta = {}) {
   try {
-    const page = await sendToTab(tabId, { type: "snapshot" });
-    // Browser pages (chrome://, the Web Store, other extensions) can't be scripted.
-    if (!page?.html) throw new Error("this kind of page does not allow extensions.");
-    return await sendToOffscreen({ type: "run", tabId, code, page });
+    return await sendToOffscreen({ type: "run", runId, tabId, code, meta });
   } catch (err) {
-    return { ok: false, stdout: "", error: `PyMonkey could not run on this page: ${err.message}` };
+    return { ok: false, error: `PyMonkey could not start the script: ${err.message}` };
   }
+}
+
+function runFinished({ runId, meta, result }) {
+  if (meta?.auto && !result.ok) console.warn(`[PyMonkey] "${meta.name}" failed on ${meta.url}\n${result.error}`);
+  // Let the side panel show the result if it happens to be open.
+  chrome.runtime
+    .sendMessage({ target: "panel", type: "run-finished", runId, meta, result })
+    .catch(() => {}); // nobody listening: fine
 }
 
 async function autoRun(tabId, url) {
   const scripts = await getScripts();
   for (const script of scripts) {
     if (!script.enabled || !script.match || !urlMatches(script.match, url)) continue;
-    const result = await runInTab(tabId, script.code);
-    if (!result.ok) console.warn(`[PyMonkey] "${script.name}" failed on ${url}\n${result.error}`);
-    // Let the side panel show the result if it happens to be open.
-    chrome.runtime
-      .sendMessage({ target: "panel", type: "run-finished", scriptId: script.id, name: script.name, url, result })
-      .catch(() => {}); // nobody listening: fine
+    // Matching scripts are queued in this order; the offscreen document runs them one at a time.
+    const runId = crypto.randomUUID();
+    const meta = { auto: true, scriptId: script.id, name: script.name, url };
+    const started = await startRun(tabId, script.code, runId, meta);
+    if (!started?.ok) runFinished({ runId, meta, result: { ok: false, stdout: "", error: started?.error } });
   }
 }
 
@@ -93,13 +115,19 @@ const handlers = {
   // content script -> a page finished loading
   "page-ready": (msg, sender) => (sender.tab ? autoRun(sender.tab.id, msg.url) : undefined),
 
-  // panel -> "Run on this page"
-  "run-in-tab": (msg) => runInTab(msg.tabId, msg.code),
+  // panel -> "Run on this page" (answers as soon as the run is queued)
+  "run-in-tab": (msg) => startRun(msg.tabId, msg.code, msg.runId),
+
+  // panel -> is this run queued, running, done or unknown?
+  "run-status": (msg) => sendToOffscreen({ type: "run-status", runId: msg.runId }),
+
+  // offscreen -> a run is over
+  "run-finished": (msg) => runFinished(msg),
 
   // panel -> start loading Python now so the first run is fast
   warm: () => sendToOffscreen({ type: "warm" }),
 
-  // offscreen -> Python wants to touch the page
+  // offscreen -> Python wants to touch the page, or needs a snapshot of it
   dom: (msg) => sendToTab(msg.tabId, { type: "dom", op: msg.op, args: msg.args }),
 };
 

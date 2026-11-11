@@ -80,11 +80,14 @@ An extension is several isolated contexts that can only pass messages to each ot
                      └──────────────────┘
 ```
 
-1. The content script snapshots the page's HTML.
-2. The background worker forwards the snapshot and your code to the offscreen document, which keeps Pyodide loaded in a web worker.
+1. The background worker forwards your code to the offscreen document, which keeps Pyodide loaded in a web worker and runs scripts one at a time, in the order they were started.
+2. When a script's turn comes, the content script snapshots the page's HTML.
 3. Python reads the snapshot with BeautifulSoup. Each `await page.something()` travels back through the same chain to the content script, which performs it on the real page.
+4. When the script ends, its output is sent to the panel as a new message.
 
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (after 30 seconds) without taking the extension down.
+
+For the same reason the panel never holds one request open for the length of a run: Chrome would drop the answer if it shut the background worker down in the meantime. Starting a run is answered at once, the result arrives later as its own message, and the panel checks on the run every few seconds. If a run is lost (for example the extension was reloaded while it ran), the panel says so instead of waiting.
 
 ## Project layout
 
@@ -97,7 +100,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, script storage
+  lib/                       URL matching, script storage, run queue and run client
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts
