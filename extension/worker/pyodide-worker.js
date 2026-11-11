@@ -5,6 +5,7 @@
 // Everything is loaded from extension/vendor/pyodide (see `npm run setup`):
 // Manifest V3 forbids loading code from a CDN at runtime.
 
+import { httpFetch } from "../lib/http.js";
 import { loadPyodide } from "../vendor/pyodide/pyodide.mjs";
 
 // Packages imported into every runtime. Keep this list short: each one costs
@@ -55,6 +56,8 @@ const runtimeReady = boot();
 // asks for it. `service` says who should do the work:
 //   "dom"    the page's content script (page.click(...) and friends)
 //   "store"  the script's saved values (page.store), kept by the background
+//   "http"   an HTTP request (page.fetch). This one goes nowhere: a worker can
+//            make requests itself, with the same rights as the background.
 
 let nextCallId = 1;
 const callsPending = new Map(); // callId -> resolve
@@ -65,12 +68,15 @@ const callsPending = new Map(); // callId -> resolve
  * the tab the script runs on and the id of the saved script, if it is one.
  */
 function makeHostCall(context) {
-  return (service, op, argsJson) =>
-    new Promise((resolve) => {
+  return (service, op, argsJson) => {
+    const args = JSON.parse(argsJson);
+    if (service === "http") return httpFetch(args).then(JSON.stringify);
+    return new Promise((resolve) => {
       const callId = nextCallId++;
       callsPending.set(callId, resolve);
-      self.postMessage({ type: "call", callId, service, ...context, op, args: JSON.parse(argsJson) });
+      self.postMessage({ type: "call", callId, service, ...context, op, args });
     });
+  };
 }
 
 // ---------- message handling ----------

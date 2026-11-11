@@ -37,7 +37,7 @@ After changing extension code, press the reload icon on the PyMonkey card in `ch
 
 ## Writing scripts
 
-Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it. `page.store` remembers values from one run to the next.
+Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it. `page.store` remembers values from one run to the next, and `page.fetch` gets other addresses.
 
 | Read (works on a snapshot of the page) | |
 |---|---|
@@ -75,7 +75,31 @@ page.store.set("seen", seen + new)
 
 Each saved script has its own store, which other scripts cannot read. It is kept in the browser's extension storage, so it is still there after Chrome restarts, and it is deleted together with the script. Keys are strings. Values can be anything JSON can hold (numbers, strings, booleans, `None`, lists, dicts) and come back the way `json.loads(json.dumps(value))` would return them, so a tuple comes back as a list. A script that has not been saved yet has no store: save it first. Chrome gives the extension about 10 MB for all scripts and everything they save; a value that does not fit raises `PageError` and what was saved before stays.
 
-Write and store calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
+| Fetch (HTTP requests) | |
+|---|---|
+| `page.fetch(url)` | Request an address and return the response. `url` may be relative to the page |
+| `response.status`, `response.ok`, `response.reason` | Status code, whether it is 200-299, and the status in words |
+| `response.text`, `response.json()` | The body as a string, or parsed as JSON |
+| `response.content`, `response.soup` | The body as bytes, or as a BeautifulSoup tree |
+| `response.headers`, `response.url` | Response headers, and the address after redirects |
+| `response.raise_for_status()` | Raise `urllib.error.HTTPError` if the status is 400 or above |
+
+```python
+for link in page.select("a.article")[:5]:
+    article = page.fetch(link["href"]).soup          # follow a link on this site
+    print(article.select_one("h1").get_text(strip=True))
+
+rates = page.fetch("https://api.example.com/rates", params={"base": "EUR"}).json()
+```
+
+`page.fetch` also takes `method`, `params` (added to the address), `headers`, a body as `data` (text, bytes, or a dict of form fields) or `json`, `timeout` in seconds (30 by default), and `cookies`. A response with an error status such as 404 is returned like any other; check `response.ok`. If there is no answer at all, `page.fetch` raises `ConnectionError`, or `TimeoutError` when it took too long. Those two and `HTTPError` are all `OSError`s, so `except OSError` catches any of them.
+
+**Requests and security.** A web page may only read answers from other sites that allow it (the browser's CORS rule). PyMonkey scripts are not held to that rule: the extension has permission for every site, so `page.fetch` can read any address. That is what makes combining data from several sites possible. It also means a script can read a site you are logged in to and send what it finds somewhere else, so there are two things to know:
+
+- Cookies are what make a request count as you. `page.fetch` sends the browser's cookies only to the site the script is running on, so following links there works while you are logged in. Requests to any other site are made without cookies, as a stranger would make them, unless the script says `cookies=True`.
+- That default prevents accidents; it does not fence a script in. A script is ordinary Python running inside the extension, and can reach the browser's own `fetch` through Pyodide's `js` module, cookies included. Treat a script like any program you install: read it before you run it, above all one that somebody else wrote.
+
+Write, store and fetch calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
 
@@ -107,7 +131,7 @@ An extension is several isolated contexts that can only pass messages to each ot
 
 1. The background worker forwards your code to the offscreen document, which keeps Pyodide loaded in a web worker and runs scripts one at a time, in the order they were started.
 2. When a script's turn comes, the content script snapshots the page's HTML.
-3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page. `page.store` calls take the same road as far as the background worker, which reads and writes the extension's storage.
+3. Python reads the snapshot with BeautifulSoup. Each write, such as `page.click(...)`, travels back through the same chain to the content script, which performs it on the real page. `page.store` calls take the same road as far as the background worker, which reads and writes the extension's storage. `page.fetch` requests need no road at all: the web worker makes them itself.
 4. When the script ends, its output is sent to the panel as a new message.
 
 Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.
@@ -125,7 +149,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts
