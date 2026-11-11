@@ -19,14 +19,18 @@ const UNREACHABLE = "PyMonkey stopped answering, so the result of this run is un
 const failure = (error) => ({ ok: false, stdout: "", error });
 
 /**
- * Returns { runId, started, result }:
+ * `timeout` is the script's time limit in seconds (see lib/timeout.js).
+ *
+ * Returns { runId, started, result, stop }:
  *   started -- Promise<boolean>, true once the run was accepted
  *   result  -- Promise<{ok, stdout, error}>, always resolves (never hangs, never rejects)
+ *   stop()  -- end the run now; `result` then resolves with "Stopped by user."
  */
 export function startRun(
   tabId,
   code,
   {
+    timeout,
     send = (message) => chrome.runtime.sendMessage({ ...message, target: "background" }),
     events = chrome.runtime.onMessage,
     pollMs = POLL_MS,
@@ -66,7 +70,7 @@ export function startRun(
   // Listen before sending, so a script that finishes instantly is not missed.
   events.addListener(onMessage);
 
-  const started = send({ type: "run-in-tab", runId, tabId, code }).then(
+  const started = send({ type: "run-in-tab", runId, tabId, code, timeout }).then(
     (reply) => {
       if (!reply?.ok) settle(failure(reply?.error ?? "PyMonkey could not start the script."));
       else if (!done) timer = setTimeout(poll, pollMs);
@@ -78,5 +82,8 @@ export function startRun(
     },
   );
 
-  return { runId, started, result };
+  // The result of a stopped run arrives like any other: as "run-finished".
+  const stop = () => send({ type: "stop-run", runId }).catch(() => {});
+
+  return { runId, started, result, stop };
 }

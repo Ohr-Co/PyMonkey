@@ -58,7 +58,11 @@ Every script gets a `page` object. Reading is instant and local; writing talks t
 | `await page.wait_for(sel, timeout=10)` | Wait for an element to appear |
 | `await page.refresh()` | Re-snapshot after the page changed |
 
-`print()` output and tracebacks show up in the panel. To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). More scripts in [`examples/`](examples).
+`print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
+
+Each script has a **time limit**, 30 seconds unless you change it in the panel. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
+
+To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). More scripts in [`examples/`](examples).
 
 Available packages: the Python standard library and BeautifulSoup. To bundle more [Pyodide packages](https://pyodide.org/en/stable/usage/packages-in-pyodide.html), add them to `BUNDLED_PACKAGES` in `scripts/setup.mjs` and rerun `npm run setup`.
 
@@ -85,7 +89,7 @@ An extension is several isolated contexts that can only pass messages to each ot
 3. Python reads the snapshot with BeautifulSoup. Each `await page.something()` travels back through the same chain to the content script, which performs it on the real page.
 4. When the script ends, its output is sent to the panel as a new message.
 
-Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (after 30 seconds) without taking the extension down.
+Pyodide lives in an offscreen document because Chrome shuts the background worker down after about 30 seconds of inactivity, which would throw away the loaded interpreter. It runs in a web worker so a script stuck in an infinite loop can be killed (by the Stop button or its time limit) without taking the extension down. The next run starts a fresh worker.
 
 For the same reason the panel never holds one request open for the length of a run: Chrome would drop the answer if it shut the background worker down in the meantime. Starting a run is answered at once, the result arrives later as its own message, and the panel checks on the run every few seconds. If a run is lost (for example the extension was reloaded while it ran), the panel says so instead of waiting.
 
@@ -100,7 +104,7 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel editor
-  lib/                       URL matching, script storage, run queue and run client
+  lib/                       URL matching, script storage, run queue and run client, time limit
   vendor/                    Pyodide files (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages
 examples/                    sample scripts
@@ -110,7 +114,7 @@ tests/                       unit tests + end-to-end test
 ## Tests
 
 ```bash
-npm test            # URL matcher (Node) + Python runtime (pytest, needs `pip install pytest beautifulsoup4`)
+npm test            # JavaScript unit tests (Node) + Python runtime (pytest, needs `pip install pytest beautifulsoup4`)
 npm run test:e2e    # loads the extension in Chrome for Testing and runs real scripts
 ```
 

@@ -29,7 +29,7 @@ h1 { margin: 0; font-size: 16px; }
 label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 label.check { flex-direction: row; align-items: center; gap: 6px; }
 
-input[type="text"], select, textarea, button {
+input[type="text"], input[type="number"], select, textarea, button {
   font: inherit;
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -40,6 +40,8 @@ input[type="text"], select, textarea, button {
 
 button { cursor: pointer; }
 button.primary { background: var(--accent); border-color: var(--accent); color: white; flex: 1; }
+button#stop { background: var(--error); border-color: var(--error); }
+[hidden] { display: none; }
 button:disabled { opacity: 0.5; cursor: default; }
 
 textarea, pre { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }

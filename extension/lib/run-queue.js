@@ -22,6 +22,13 @@ export function createRunQueue({ start, onFinished, keep = KEEP_FINISHED }) {
     start(active);
   }
 
+  function remember(run, result) {
+    finished.set(run.runId, result);
+    // A Map keeps insertion order, so the first key is the oldest result.
+    while (finished.size > keep) finished.delete(finished.keys().next().value);
+    onFinished(run, result);
+  }
+
   return {
     add(run) {
       waiting.push(run);
@@ -36,11 +43,17 @@ export function createRunQueue({ start, onFinished, keep = KEEP_FINISHED }) {
       if (!active) return;
       const run = active;
       active = null;
-      finished.set(run.runId, result);
-      // A Map keeps insertion order, so the first key is the oldest result.
-      while (finished.size > keep) finished.delete(finished.keys().next().value);
-      onFinished(run, result);
+      remember(run, result);
       startNext();
+    },
+
+    /** Take a run that has not started yet out of the queue. Returns false if it was not waiting. */
+    cancel(runId, result) {
+      const i = waiting.findIndex((run) => run.runId === runId);
+      if (i === -1) return false;
+      const [run] = waiting.splice(i, 1);
+      remember(run, result);
+      return true;
     },
 
     /** Where a run is: queued, running, done (with its result) or unknown. */

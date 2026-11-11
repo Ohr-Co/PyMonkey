@@ -6,16 +6,18 @@
 // Its jobs:
 //   * queue run requests from the background and feed them to the worker one at a time
 //   * pass the worker's DOM requests back out (workers have no chrome.* APIs)
-//   * kill the worker if a script hangs; the next request starts a new one (e.g. `while True: pass`)
+//   * kill the worker when a script passes its time limit or the user presses Stop;
+//     the next request starts a new one
 //   * announce each result to the background, and keep it for anyone who asks later
 
 import { createRunQueue } from "../lib/run-queue.js";
+import { timeoutSeconds } from "../lib/timeout.js";
 
-const RUN_TIMEOUT_MS = 30_000; // counted from when the script actually starts
 const SNAPSHOT_TIMEOUT_MS = 15_000;
 
 let worker = null;
-let runTimer = null; // timeout of the run that is executing
+let activeTimeout = 0; // time limit, in seconds, of the run that is executing (0 = none)
+let runTimer = null; // its timer, counted from when the script actually starts
 let nextWarmId = 1;
 const warmPending = new Map(); // id -> resolve
 
@@ -35,18 +37,34 @@ function startWorker() {
       ? `Python runtime crashed: ${e.message}`
       : "Pyodide files not found in extension/vendor/pyodide. In the project folder run " +
         "`npm install` then `npm run setup`, then reload the extension at chrome://extensions.";
-    stopWorker(reason);
+    // Python itself is broken: fail everything in flight, including "warm" requests.
+    worker?.terminate();
+    worker = null;
+    const failed = { ok: false, stdout: "", error: reason };
+    for (const resolve of warmPending.values()) resolve(failed);
+    warmPending.clear();
+    finishRun(failed);
   };
 }
 
-// Stop the worker and fail everything in flight. The next request starts a fresh one.
-function stopWorker(reason) {
+// End the run that is executing by killing the worker: the only way to stop
+// Python that is busy (e.g. `while True: pass`). The next run gets a fresh worker.
+function killRun(reason) {
   worker?.terminate();
   worker = null;
-  const failed = { ok: false, stdout: "", error: reason };
-  for (const resolve of warmPending.values()) resolve(failed);
-  warmPending.clear();
-  finishRun(failed);
+  finishRun({ ok: false, stdout: "", error: reason });
+  // Python was fine, so anyone waiting for it to load keeps waiting, on a new worker.
+  if (warmPending.size > 0) {
+    if (!worker) startWorker();
+    for (const id of warmPending.keys()) worker.postMessage({ type: "warm", id });
+  }
+}
+
+// The user pressed Stop.
+function stopRun(runId) {
+  const reason = "Stopped by user.";
+  if (runs.isActive(runId)) killRun(reason);
+  else runs.cancel(runId, { ok: false, stdout: "", error: reason }); // not started yet: just drop it
 }
 
 function warm() {
@@ -61,10 +79,12 @@ function warm() {
 function onWorkerMessage(data) {
   if (data.type === "started") {
     // Python is loaded and the script is now executing: start the clock.
-    if (runs.isActive(data.id)) {
+    // (activeTimeout is 0 when the script has no time limit.)
+    if (runs.isActive(data.id) && activeTimeout > 0) {
+      const limit = activeTimeout;
       runTimer = setTimeout(
-        () => stopWorker(`Script stopped: it ran longer than ${RUN_TIMEOUT_MS / 1000}s.`),
-        RUN_TIMEOUT_MS,
+        () => killRun(`Script stopped: it ran longer than ${limit}s. Its time limit can be changed in the panel.`),
+        limit * 1000,
       );
     }
   } else if (data.type === "result") {
@@ -105,7 +125,8 @@ async function startRun(run) {
     }
     return;
   }
-  if (!runs.isActive(run.runId)) return; // the worker crashed while we were waiting for the page
+  if (!runs.isActive(run.runId)) return; // stopped, or the worker crashed, while we were waiting for the page
+  activeTimeout = timeoutSeconds(run.timeout);
   if (!worker) startWorker();
   worker.postMessage({ type: "run", id: run.runId, tabId: run.tabId, code: run.code, page });
 }
@@ -138,7 +159,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.type === "run") {
     // Answer at once: the result is announced later with "run-finished".
-    runs.add({ runId: msg.runId, tabId: msg.tabId, code: msg.code, meta: msg.meta });
+    runs.add({ runId: msg.runId, tabId: msg.tabId, code: msg.code, timeout: msg.timeout, meta: msg.meta });
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === "stop-run") {
+    stopRun(msg.runId);
     sendResponse({ ok: true });
     return;
   }

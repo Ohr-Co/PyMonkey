@@ -44,13 +44,13 @@ try {
 
   // Start a script with the same module the panel uses. The run is left on
   // `window.__run` so a test can interfere while it is in flight.
-  const start = (code) =>
-    panel.evaluate(async (code, pageUrl) => {
+  const start = (code, options = {}) =>
+    panel.evaluate(async (code, pageUrl, options) => {
       const { startRun } = await import("/lib/run-client.js");
       const [tab] = await chrome.tabs.query({ url: pageUrl });
-      window.__run = startRun(tab.id, code);
+      window.__run = startRun(tab.id, code, options);
       return window.__run.started;
-    }, code, pageUrl);
+    }, code, pageUrl, options);
   const finish = () => panel.evaluate(() => window.__run.result);
   const run = async (code) => {
     await start(code);
@@ -116,7 +116,46 @@ try {
   assert.equal(result.stdout, "alive\n");
   console.log("ok  a lost run is reported, runtime recovers");
 
-  // 7. The panel's own Run button, end to end.
+  //    Optional, takes six minutes (E2E_LONG=1): a script with no time limit
+  //    that runs past the 5 minutes Chrome allows the background worker for
+  //    any single request, touching the page along the way.
+  if (process.env.E2E_LONG) {
+    const slow = `import asyncio\nfor step in range(11):\n    await asyncio.sleep(30)\n    await page.set_attr("h1", "data-step", str(step))\nprint("finished after 330 seconds")`;
+    assert.equal(await start(slow, { timeout: 0 }), true);
+    // Ask every few seconds rather than hold one six-minute request open to the
+    // browser: puppeteer gives up on any single request after three minutes.
+    await panel.evaluate(() => {
+      window.__run.result.then((r) => (window.__longResult = r));
+    });
+    const deadline = Date.now() + 400_000;
+    let longResult = null;
+    while (!longResult) {
+      assert.ok(Date.now() < deadline, "the six-minute script never reported a result");
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      longResult = await panel.evaluate(() => window.__longResult ?? null);
+    }
+    assert.deepEqual(longResult, { ok: true, stdout: "finished after 330 seconds\n", error: null });
+    assert.equal(await page.$eval("h1", (el) => el.dataset.step), "10");
+    console.log("ok  a script running for 5.5 minutes returns its output");
+  }
+
+  // 7. Stopping a run that is still waiting its turn leaves the running one alone.
+  const both = await panel.evaluate(async (pageUrl) => {
+    const { startRun } = await import("/lib/run-client.js");
+    const [tab] = await chrome.tabs.query({ url: pageUrl });
+    const first = startRun(tab.id, `import asyncio\nawait asyncio.sleep(1)\nprint("first")`);
+    await first.started;
+    const second = startRun(tab.id, `print("second")`);
+    await second.started;
+    await second.stop();
+    return { first: await first.result, second: await second.result };
+  }, pageUrl);
+  assert.equal(both.first.stdout, "first\n");
+  assert.deepEqual(both.second, { ok: false, stdout: "", error: "Stopped by user." });
+  console.log("ok  a queued run can be stopped");
+
+  // 8. The panel itself: its buttons, fields and output pane.
+  // Put `code` in the editor (if given), press Run, and return at once.
   const pressRun = (code) =>
     panel.evaluate((code) => {
       if (code !== undefined) document.getElementById("code").value = code;
@@ -131,31 +170,64 @@ try {
     );
     return panel.$eval("#output", (el) => ({ text: el.textContent, isError: el.classList.contains("error") }));
   };
+  const visible = (id) => panel.$eval(`#${id}`, (el) => !el.hidden);
 
   //    The panel runs on "the active tab", which in this test is the panel
   //    itself: an extension page, where scripts are not allowed.
   await pressRun();
-  const shown = await panelOutput();
+  let shown = await panelOutput();
   assert.match(shown.text, /PyMonkey could not run on this page/);
   assert.equal(shown.isError, true);
   console.log("ok  panel reports a page it cannot run on");
 
-  //    Then point it at the test page.
+  //    From here on, point it at the test page.
   await panel.evaluate(async (pageUrl) => {
     const [tab] = await chrome.tabs.query({ url: pageUrl });
     chrome.tabs.query = async () => [tab];
   }, pageUrl);
   await pressRun(`print("from the panel:", page.title)`);
   assert.deepEqual(await panelOutput(), { text: "from the panel: clicked\n", isError: false });
-  await panel.reload(); // drop the chrome.tabs.query stand-in
   console.log("ok  panel Run button shows the script's output");
 
-  // 8. Auto-run: saved scripts with a matching URL pattern run on page load,
-  //    one after the other. The second one must see what the first one changed.
+  //    Stop: the button appears while a script runs and ends it within a second,
+  //    even a script that never gives control back.
+  assert.deepEqual([await visible("run"), await visible("stop")], [true, false]);
+  await pressRun(`while True: pass`);
+  await panel.waitForFunction(() => !document.getElementById("stop").hidden, { timeout: 5_000 });
+  assert.equal(await visible("run"), false);
+  await new Promise((resolve) => setTimeout(resolve, 1_000)); // let the loop really spin
+  const stopClicked = Date.now();
+  await panel.click("#stop");
+  shown = await panelOutput();
+  const stopTook = Date.now() - stopClicked;
+  assert.deepEqual(shown, { text: "Stopped by user.", isError: true });
+  assert.ok(stopTook < 1_000, `Stop took ${stopTook} ms`);
+  assert.deepEqual([await visible("run"), await visible("stop")], [true, false]);
+  //    ...and the next run works without reloading anything.
+  await pressRun(`print("alive")`);
+  assert.deepEqual(await panelOutput(), { text: "alive\n", isError: false });
+  console.log(`ok  Stop button ends a busy script (${stopTook} ms), next run works`);
+
+  //    Time limit: the field in the panel decides when a script is cut off.
+  assert.equal(await panel.$eval("#timeout", (el) => el.value), "30");
+  await panel.$eval("#timeout", (el) => (el.value = "1"));
+  await pressRun(`while True: pass`);
+  shown = await panelOutput();
+  assert.match(shown.text, /ran longer than 1s/);
+  await panel.$eval("#timeout", (el) => (el.value = "0")); // no limit: a slow script may finish
+  await pressRun(`import asyncio\nawait asyncio.sleep(2)\nprint("slow but done")`);
+  assert.deepEqual(await panelOutput(), { text: "slow but done\n", isError: false });
+  await panel.reload(); // drop the chrome.tabs.query stand-in
+  console.log("ok  time limit follows the panel's field");
+
+  // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
+  //    one after the other. The first is cut off by its own 1-second time limit;
+  //    the third must see what the second one changed.
   await panel.evaluate(async (match) => {
     const second = `first = page.select_one("body").get("data-pymonkey")\nawait page.set_attr("body", "data-second", f"saw-{first}")`;
     await chrome.storage.local.set({
       scripts: [
+        { id: "t0", name: "stuck", enabled: true, match, timeout: 1, code: `while True: pass` },
         { id: "t1", name: "auto", enabled: true, match, code: `await page.set_attr("body", "data-pymonkey", "ran")` },
         { id: "t2", name: "auto 2", enabled: true, match, code: second },
       ],

@@ -25,10 +25,16 @@
 
     <label class="check"><input id="enabled" type="checkbox" checked /> Enabled</label>
 
+    <label>
+      Time limit in seconds (0 = no limit)
+      <input id="timeout" type="number" min="0" step="1" value="30" />
+    </label>
+
     <textarea id="code" spellcheck="false" aria-label="Python code"></textarea>
 
     <div class="row">
       <button id="run" class="primary">Run on this page</button>
+      <button id="stop" class="primary" hidden>Stop</button>
       <button id="save">Save</button>
       <button id="delete">Delete</button>
     </div>
