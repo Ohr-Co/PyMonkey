@@ -309,6 +309,12 @@ The last check is different: it loads the extension as it is, allowed nowhere, c
 TOOLBAR_CHROME_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:e2e
 ```
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests and how to propose a change. Contributors are asked to agree to the [contributor license agreement](CLA.md), which lets the project be offered under other license terms later while you keep the copyright in your work.
+
+To report a security problem, see [SECURITY.md](SECURITY.md); please do not open a public issue for it.
+
 ## License
 
 [AGPL-3.0](LICENSE)
