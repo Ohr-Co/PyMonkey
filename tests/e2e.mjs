@@ -31,7 +31,8 @@ const browser = await puppeteer.launch({
 });
 
 try {
-  const swTarget = await browser.waitForTarget((t) => t.type() === "service_worker");
+  const isServiceWorker = (t) => t.type() === "service_worker";
+  const swTarget = await browser.waitForTarget(isServiceWorker);
   const extensionId = new URL(swTarget.url()).host;
 
   const page = await browser.newPage();
@@ -41,11 +42,20 @@ try {
   const panel = await browser.newPage();
   await panel.goto(`chrome-extension://${extensionId}/panel/panel.html`);
 
-  const run = (code) =>
+  // Start a script with the same module the panel uses. The run is left on
+  // `window.__run` so a test can interfere while it is in flight.
+  const start = (code) =>
     panel.evaluate(async (code, pageUrl) => {
+      const { startRun } = await import("/lib/run-client.js");
       const [tab] = await chrome.tabs.query({ url: pageUrl });
-      return chrome.runtime.sendMessage({ target: "background", type: "run-in-tab", tabId: tab.id, code });
+      window.__run = startRun(tab.id, code);
+      return window.__run.started;
     }, code, pageUrl);
+  const finish = () => panel.evaluate(() => window.__run.result);
+  const run = async (code) => {
+    await start(code);
+    return finish();
+  };
 
   // 1. Read: snapshot + BeautifulSoup
   let result = await run(`print(page.title)\nprint([a["href"] for a in page.select("a")])`);
@@ -78,15 +88,82 @@ try {
     console.log("ok  runaway script killed, runtime restarted");
   }
 
-  // 5. Auto-run: a saved script with a matching URL pattern runs on page load
+  // 5. Chrome shuts the background service worker down in the middle of a run:
+  //    the script keeps going, can still reach the page, and its output arrives.
+  assert.equal(
+    await start(`import asyncio\nawait asyncio.sleep(2)\nawait page.set_attr("h1", "data-late", "yes")\nprint("survived")`),
+    true,
+  );
+  const oldWorker = await browser.waitForTarget(isServiceWorker);
+  const stopped = new Promise((resolve) => browser.on("targetdestroyed", (t) => t === oldWorker && resolve()));
+  await (await oldWorker.worker()).close();
+  await stopped;
+  result = await finish();
+  assert.deepEqual(result, { ok: true, stdout: "survived\n", error: null });
+  assert.equal(await page.$eval("h1", (el) => el.dataset.late), "yes");
+  // The result was passed on by a new worker, started by the script's own messages.
+  await browser.waitForTarget((t) => isServiceWorker(t) && t !== oldWorker, { timeout: 5_000 });
+  console.log("ok  result survives a background worker shutdown");
+
+  // 6. The run itself is lost (here: the whole runtime page goes away).
+  //    The panel must be told, not left waiting.
+  assert.equal(await start(`import asyncio\nawait asyncio.sleep(60)`), true);
+  await panel.evaluate(() => chrome.offscreen.closeDocument());
+  result = await finish();
+  assert.equal(result.ok, false);
+  assert.match(result.error, /result of this run was lost/);
+  result = await run(`print("alive")`);
+  assert.equal(result.stdout, "alive\n");
+  console.log("ok  a lost run is reported, runtime recovers");
+
+  // 7. The panel's own Run button, end to end.
+  const pressRun = (code) =>
+    panel.evaluate((code) => {
+      if (code !== undefined) document.getElementById("code").value = code;
+      document.getElementById("output").textContent = "";
+      document.getElementById("run").click();
+    }, code);
+  // Wait for the run to be over and return what the output pane shows.
+  const panelOutput = async () => {
+    await panel.waitForFunction(
+      () => !["", "Running…"].includes(document.getElementById("output").textContent),
+      { timeout: 15_000 },
+    );
+    return panel.$eval("#output", (el) => ({ text: el.textContent, isError: el.classList.contains("error") }));
+  };
+
+  //    The panel runs on "the active tab", which in this test is the panel
+  //    itself: an extension page, where scripts are not allowed.
+  await pressRun();
+  const shown = await panelOutput();
+  assert.match(shown.text, /PyMonkey could not run on this page/);
+  assert.equal(shown.isError, true);
+  console.log("ok  panel reports a page it cannot run on");
+
+  //    Then point it at the test page.
+  await panel.evaluate(async (pageUrl) => {
+    const [tab] = await chrome.tabs.query({ url: pageUrl });
+    chrome.tabs.query = async () => [tab];
+  }, pageUrl);
+  await pressRun(`print("from the panel:", page.title)`);
+  assert.deepEqual(await panelOutput(), { text: "from the panel: clicked\n", isError: false });
+  await panel.reload(); // drop the chrome.tabs.query stand-in
+  console.log("ok  panel Run button shows the script's output");
+
+  // 8. Auto-run: saved scripts with a matching URL pattern run on page load,
+  //    one after the other. The second one must see what the first one changed.
   await panel.evaluate(async (match) => {
+    const second = `first = page.select_one("body").get("data-pymonkey")\nawait page.set_attr("body", "data-second", f"saw-{first}")`;
     await chrome.storage.local.set({
-      scripts: [{ id: "t1", name: "auto", enabled: true, match, code: `await page.set_attr("body", "data-pymonkey", "ran")` }],
+      scripts: [
+        { id: "t1", name: "auto", enabled: true, match, code: `await page.set_attr("body", "data-pymonkey", "ran")` },
+        { id: "t2", name: "auto 2", enabled: true, match, code: second },
+      ],
     });
   }, pageUrl + "*");
   await page.reload();
-  await page.waitForSelector("body[data-pymonkey=ran]", { timeout: 15_000 });
-  console.log("ok  saved script auto-runs on matching URL");
+  await page.waitForSelector("body[data-pymonkey=ran][data-second=saw-ran]", { timeout: 15_000 });
+  console.log("ok  saved scripts auto-run in order on matching URL");
 
   console.log("\nAll end-to-end checks passed.");
 } finally {

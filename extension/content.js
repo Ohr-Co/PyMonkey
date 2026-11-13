@@ -1,5 +1,5 @@
 // Content script: the ONLY part of PyMonkey that can touch the real page.
-// It has no Python. It does two things when the background asks:
+// It has no Python. It does two things when the background asks, both as "dom" operations:
 //   1. snapshot the page (HTML string) so Python can read it with BeautifulSoup
 //   2. run one DOM primitive (click, set_text, ...) on Python's behalf
 //
@@ -79,11 +79,6 @@
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.target !== "content") return;
-
-    if (msg.type === "snapshot") {
-      sendResponse(snapshot());
-      return;
-    }
 
     if (msg.type === "dom") {
       const op = ops[msg.op];
