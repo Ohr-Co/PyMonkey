@@ -18,13 +18,13 @@ page.click("button.load-more")
 
 ## Quick start
 
-Requires Chrome 137 or newer, and [Node.js](https://nodejs.org) 22+ (only to fetch Pyodide; the extension itself has no build step).
+Requires Chrome 137 or newer, and [Node.js](https://nodejs.org) 22+. Node is needed once, for `npm run setup`, which puts the third-party code (Pyodide and the code editor) into the extension. PyMonkey's own files are loaded by Chrome as they are, with no build step.
 
 ```bash
 git clone https://github.com/Ohr-Co/PyMonkey.git
 cd PyMonkey
 npm install
-npm run setup      # copies Pyodide + the bundled Python packages into extension/vendor/
+npm run setup      # puts Pyodide, the bundled Python packages and the code editor into extension/vendor/
 ```
 
 Then in Chrome:
@@ -113,6 +113,10 @@ page.download("links.csv", rows)
 The file arrives like any other download. For CSV, the columns are the keys of the dicts in the order they first appear, and a row without a key gets an empty cell; a list of lists is written without a header line. The file is UTF-8 with a byte-order mark so that Excel shows accented letters correctly (in Python, read it back with `encoding="utf-8-sig"`). Cells are written as scraped: text starting with `=` is a formula to a spreadsheet, so be as careful with a file scraped from a site you do not trust as with any other spreadsheet from a stranger. A file can be up to 30 MB, far beyond 10,000 rows. When a script saves several files in a row, Chrome may ask once whether the site may download multiple files.
 
 Write, store, fetch and download calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
+
+The panel's **editor** colors Python as you type, in light and dark mode. Enter after a line ending in a colon starts the next line one level deeper. Tab indents and Shift+Tab dedents, the selected lines if there are any. Because Tab indents, moving on to the next field with the keyboard takes two keys: Escape, then Tab.
+
+What you type is not lost when the panel closes: the panel reopens with the script you were working on, changes you had not saved included. Saved scripts only change when you press **Save**.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
 
@@ -216,10 +220,11 @@ extension/
   offscreen/                 hidden page that owns the Python worker
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
-  panel/                     side panel editor
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages
-  vendor/                    Pyodide files (created by `npm run setup`, not in git)
-scripts/setup.mjs            fetches Pyodide and bundled packages
+  panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft
+  vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
+scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
+scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
 examples/                    sample scripts
 tests/                       unit tests + end-to-end test
 ```

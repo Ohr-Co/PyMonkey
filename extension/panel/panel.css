@@ -3,6 +3,19 @@
   --border: color-mix(in srgb, currentColor 22%, transparent);
   --accent: #2f6fde;
   --error: #d1433a;
+  /* The code editor's colors. Code is told apart mostly by weight and shade:
+     keywords bold, comments gray, and one color for literal values. */
+  --code-muted: #6a6a6a; /* comments, line numbers */
+  --code-value: #1f5fd1; /* strings, numbers, True/False/None */
+  --code-match: color-mix(in srgb, currentColor 18%, transparent); /* the bracket matching the one at the cursor */
+}
+
+/* The same in dark mode (when the browser or system is set to dark). */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --code-muted: #9a9a9a;
+    --code-value: #8ab4ff;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -29,7 +42,7 @@ h1 { margin: 0; font-size: 16px; }
 label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 label.check { flex-direction: row; align-items: center; gap: 6px; }
 
-input[type="text"], input[type="number"], select, textarea, button {
+input[type="text"], input[type="number"], select, button {
   font: inherit;
   padding: 6px 8px;
   border: 1px solid var(--border);
@@ -44,8 +57,34 @@ button#stop { background: var(--error); border-color: var(--error); }
 [hidden] { display: none; }
 button:disabled { opacity: 0.5; cursor: default; }
 
-textarea, pre { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
-textarea { flex: 2; min-height: 160px; resize: none; tab-size: 4; white-space: pre; }
+pre, #code .cm-scroller { font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace; }
+
+/* ---------- the code editor ----------
+   CodeMirror (see editor.js) builds the editor inside #code and names its
+   parts .cm-something. It brings its own colors, made for a white page;
+   the rules below replace them with ones that follow light and dark mode. */
+#code {
+  flex: 2;
+  min-height: 160px;
+  overflow: hidden; /* the editor scrolls inside, the frame stays put */
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+#code:focus-within { outline: 2px solid var(--accent); outline-offset: -1px; }
+#code .cm-editor { height: 100%; }
+#code .cm-editor.cm-focused { outline: none; } /* the frame shows the focus instead */
+#code .cm-content { caret-color: currentColor; }
+/* The line numbers stay put while long lines scroll sideways beneath them,
+   so they need a background that is not see-through. Canvas is the page's own. */
+#code .cm-gutters { background: Canvas; border: none; color: var(--code-muted); }
+#code .cm-matchingBracket { background: var(--code-match); }
+
+/* Syntax highlighting: the editor gives each piece of code a class by its role. */
+#code .tok-keyword { font-weight: 600; }
+#code .tok-definition, #code .tok-className { font-weight: 600; } /* the name in `def name(...)` and `class Name:` */
+#code .tok-comment { color: var(--code-muted); font-style: italic; }
+#code .tok-string, #code .tok-string2, #code .tok-number, #code .tok-bool, #code .tok-atom { color: var(--code-value); }
+#code .tok-meta { color: var(--code-muted); } /* decorators */
 
 pre {
   flex: 1;

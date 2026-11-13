@@ -390,13 +390,27 @@ try {
   console.log("ok  a queued run can be stopped");
 
   // 8. The panel itself: its buttons, fields and output pane.
+  // The editor is CodeMirror, which can be asked for the editor that lives in an element.
+  const editorText = () =>
+    panel.evaluate(async () => {
+      const { EditorView } = await import("/vendor/codemirror/codemirror.js");
+      return EditorView.findFromDOM(document.getElementById("code")).state.doc.toString();
+    });
+  // Replace the editor's text the way an edit by the user does.
+  const setEditorText = (text) =>
+    panel.evaluate(async (text) => {
+      const { EditorView } = await import("/vendor/codemirror/codemirror.js");
+      const view = EditorView.findFromDOM(document.getElementById("code"));
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: text } });
+    }, text);
   // Put `code` in the editor (if given), press Run, and return at once.
-  const pressRun = (code) =>
-    panel.evaluate((code) => {
-      if (code !== undefined) document.getElementById("code").value = code;
+  const pressRun = async (code) => {
+    if (code !== undefined) await setEditorText(code);
+    await panel.evaluate(() => {
       document.getElementById("output").textContent = "";
       document.getElementById("run").click();
-    }, code);
+    });
+  };
   // Wait for the run to be over and return what the output pane shows.
   const panelOutput = async () => {
     await panel.waitForFunction(
@@ -476,6 +490,175 @@ try {
   assert.deepEqual(await panelOutput(), { text: "slow but done\n", isError: false });
   await panel.reload(); // drop the chrome.tabs.query stand-in
   console.log("ok  time limit follows the panel's field");
+
+  // 8b. The code editor.
+  const panelUrl = `chrome-extension://${extensionId}/panel/panel.html`;
+  // The panel is ready once it has read the saved scripts and filled its fields.
+  const panelReady = () => panel.waitForSelector("#script-list option", { timeout: 5_000 });
+  const closeAndReopenPanel = async () => {
+    await panel.close();
+    panel = await browser.newPage();
+    await panel.goto(panelUrl);
+    await panelReady();
+  };
+  const pressWith = async (modifier, key) => {
+    await panel.keyboard.down(modifier);
+    await panel.keyboard.press(key);
+    await panel.keyboard.up(modifier);
+  };
+  const selectAll = () => pressWith(process.platform === "darwin" ? "Meta" : "Control", "a");
+
+  //     The reload above was a first test: the fields came back as they were left.
+  await panelReady();
+  assert.match(await editorText(), /slow but done/);
+  assert.equal(await panel.$eval("#timeout", (el) => el.value), "0");
+
+  //     Typing: Enter after a colon goes one level deeper, Shift+Tab comes back
+  //     out, Tab moves to the next level wherever the cursor is.
+  await panel.click("#code .cm-content");
+  await selectAll();
+  await panel.keyboard.press("Backspace");
+  await panel.keyboard.type("def f(x):\nif x:\nreturn 1\n");
+  await pressWith("Shift", "Tab");
+  await panel.keyboard.type("y = 2");
+  await panel.keyboard.press("Tab");
+  await panel.keyboard.type("# end");
+  const typed = "def f(x):\n    if x:\n        return 1\n    y = 2   # end";
+  assert.equal(await editorText(), typed);
+  //     With lines selected, Tab and Shift+Tab move them all.
+  await selectAll();
+  await panel.keyboard.press("Tab");
+  assert.equal(await editorText(), typed.replace(/^/gm, "    "));
+  await pressWith("Shift", "Tab");
+  assert.equal(await editorText(), typed);
+  console.log("ok  editor: Enter indents after a colon, Tab and Shift+Tab indent and dedent");
+
+  //     Highlighting, in light and dark mode: keywords are bold, strings and
+  //     comments have their own color, and all of it can be read (contrast of
+  //     4.5 to 1 or better against the background).
+  await setEditorText(`def f(x):\n    return "text"  # note\n`);
+  const editorColors = () =>
+    panel.evaluate(() => {
+      const visible = (color) => color !== "transparent" && !/, 0\)$/.test(color);
+      // The color behind an element: its own background, or the nearest one up the tree, or the page's.
+      const backgroundOf = (el) => {
+        for (; el; el = el.parentElement) {
+          const color = getComputedStyle(el).backgroundColor;
+          if (visible(color)) return color;
+        }
+        const probe = document.body.appendChild(document.createElement("div"));
+        probe.style.backgroundColor = "Canvas";
+        const color = getComputedStyle(probe).backgroundColor;
+        probe.remove();
+        return color;
+      };
+      const piece = (selector, text) => {
+        const el = [...document.querySelectorAll(`#code ${selector}`)].find((el) => el.textContent === text);
+        const style = getComputedStyle(el);
+        return { color: style.color, background: backgroundOf(el), weight: Number(style.fontWeight), italic: style.fontStyle === "italic" };
+      };
+      return {
+        plain: piece("span", "x"),
+        keyword: piece("span", "def"),
+        name: piece("span", "f"),
+        string: piece("span", '"text"'),
+        comment: piece("span", "# note"),
+        lineNumber: piece(".cm-gutterElement", "2"),
+      };
+    });
+  const luminance = (color) => {
+    const [r, g, b] = color.match(/[\d.]+/g).slice(0, 3).map((part) => {
+      const c = Number(part) / 255;
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = ({ color, background }) => {
+    const [dark, light] = [luminance(color), luminance(background)].sort((a, b) => a - b);
+    return (light + 0.05) / (dark + 0.05);
+  };
+  for (const scheme of ["light", "dark"]) {
+    await panel.emulateMediaFeatures([{ name: "prefers-color-scheme", value: scheme }]);
+    const colors = await editorColors();
+    assert.ok(colors.keyword.weight >= 600 && colors.name.weight >= 600 && colors.plain.weight === 400, scheme);
+    assert.notEqual(colors.string.color, colors.plain.color, scheme);
+    assert.notEqual(colors.comment.color, colors.plain.color, scheme);
+    assert.notEqual(colors.comment.color, colors.string.color, scheme);
+    assert.equal(colors.comment.italic, true, scheme);
+    for (const [what, piece] of Object.entries(colors)) {
+      assert.ok(contrast(piece) >= 4.5, `${scheme} mode: ${what} is ${piece.color} on ${piece.background}`);
+    }
+    //   Light mode is dark text on a light background, dark mode the reverse.
+    const textIsDark = luminance(colors.plain.color) < luminance(colors.plain.background);
+    assert.equal(textIsDark, scheme === "light", scheme);
+  }
+  await panel.emulateMediaFeatures([{ name: "prefers-color-scheme", value: "light" }]);
+  console.log("ok  editor: Python is highlighted and readable in light and dark mode");
+
+  //     The editor is part of the extension: the panel loads nothing from elsewhere.
+  //     (Watch every request the panel makes while it loads again.)
+  const loaded = [];
+  const noteRequest = (request) => loaded.push(request.url());
+  panel.on("request", noteRequest);
+  await panel.reload();
+  await panelReady();
+  await panel.waitForSelector("#code .cm-content");
+  panel.off("request", noteRequest);
+  assert.ok(loaded.includes(`chrome-extension://${extensionId}/vendor/codemirror/codemirror.js`), loaded.join("\n"));
+  assert.deepEqual(loaded.filter((url) => !url.startsWith(`chrome-extension://${extensionId}/`)), []);
+  console.log("ok  editor: the library is loaded from inside the extension");
+
+  //     Unsaved work survives closing the panel. First a script that was never saved...
+  await setEditorText(`print("never saved")`);
+  await panel.type("#name", "Draft");
+  await panel.type("#match", "https://example.com/*");
+  await panel.click("#enabled");
+  await closeAndReopenPanel();
+  const fields = () =>
+    panel.evaluate(() => ({
+      selected: document.getElementById("script-list").selectedOptions[0].textContent,
+      name: document.getElementById("name").value,
+      match: document.getElementById("match").value,
+      enabled: document.getElementById("enabled").checked,
+      timeout: document.getElementById("timeout").value,
+    }));
+  assert.equal(await editorText(), `print("never saved")`);
+  assert.deepEqual(await fields(), {
+    selected: "(unsaved script)", name: "Draft", match: "https://example.com/*", enabled: false, timeout: "0",
+  });
+  //     ...then a saved script with a change that was not saved: the change
+  //     comes back in the panel, and the saved script is still the old one.
+  await panel.click("#save");
+  await panel.waitForFunction(() => document.getElementById("script-list").value !== "", { timeout: 5_000 });
+  await panel.click("#code .cm-content");
+  await selectAll();
+  await panel.keyboard.type(`print("changed, not saved")`);
+  await closeAndReopenPanel();
+  assert.equal(await editorText(), `print("changed, not saved")`);
+  assert.equal((await fields()).selected, "Draft");
+  const savedCode = () => panel.evaluate(async () => (await chrome.storage.local.get("scripts")).scripts.map((s) => s.code));
+  assert.deepEqual(await savedCode(), [`print("never saved")`]);
+  //     Undo goes back over the typing, but not into another script's text.
+  await panel.click("#save");
+  await panel.waitForFunction(async () => (await chrome.storage.local.get("scripts")).scripts[0].code.includes("changed"));
+  await panel.click("#new");
+  await panel.click("#code .cm-content");
+  await pressWith(process.platform === "darwin" ? "Meta" : "Control", "z");
+  assert.match(await editorText(), /^# `page` is the page you are looking at/);
+  //     A script without changes is shown as it is saved now, not as it was when the panel closed.
+  await panel.select("#script-list", await panel.$eval("#script-list option:nth-child(2)", (o) => o.value));
+  await panel.waitForFunction(() => document.getElementById("name").value === "Draft");
+  await panel.evaluate(async () => {
+    const { scripts } = await chrome.storage.local.get("scripts");
+    await chrome.storage.local.set({ scripts: [{ ...scripts[0], code: `print("changed elsewhere")` }] });
+  });
+  await closeAndReopenPanel();
+  assert.equal(await editorText(), `print("changed elsewhere")`);
+  await panel.click("#delete");
+  await panel.waitForFunction(() => document.getElementById("script-list").options.length === 1, { timeout: 5_000 });
+  await closeAndReopenPanel();
+  assert.match(await editorText(), /^# `page` is the page you are looking at/); // nothing left over from the deleted script
+  console.log("ok  editor: unsaved text survives closing and reopening the panel");
 
   // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
   //    one after the other. The first is cut off by its own 1-second time limit;
