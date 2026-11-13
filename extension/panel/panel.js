@@ -3,12 +3,13 @@
 
 import { startRun } from "../lib/run-client.js";
 import { getScripts, saveScript, deleteScript } from "../lib/storage.js";
+import { timeoutSeconds } from "../lib/timeout.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
   status: $("status"), list: $("script-list"), name: $("name"), match: $("match"),
-  enabled: $("enabled"), code: $("code"), output: $("output"),
-  run: $("run"), save: $("save"), del: $("delete"), newBtn: $("new"),
+  enabled: $("enabled"), timeout: $("timeout"), code: $("code"), output: $("output"),
+  run: $("run"), stop: $("stop"), save: $("save"), del: $("delete"), newBtn: $("new"),
 };
 
 const STARTER = `# \`page\` is the page you are looking at.
@@ -21,6 +22,7 @@ for link in page.select("a[href]")[:10]:
 `;
 
 let currentId = null; // id of the script being edited, or null for an unsaved one
+let currentRun = null; // the run started with the Run button, while it is in flight
 
 const toBackground = (message) => chrome.runtime.sendMessage({ ...message, target: "background" });
 
@@ -35,6 +37,7 @@ function loadIntoEditor(script) {
   els.name.value = script?.name ?? "";
   els.match.value = script?.match ?? "";
   els.enabled.checked = script?.enabled ?? true;
+  els.timeout.value = timeoutSeconds(script?.timeout);
   els.code.value = script?.code ?? STARTER;
 }
 
@@ -53,13 +56,20 @@ async function refreshList(selectId = currentId) {
 els.run.addEventListener("click", async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) return showOutput({ ok: false, error: "No active tab found." });
-  els.run.disabled = true;
+  // While the script runs, the Run button is replaced by Stop.
+  els.run.hidden = true;
+  els.stop.hidden = false;
   els.output.classList.remove("error");
   els.output.textContent = "Running…";
-  // `result` always arrives, even if the run was lost (see lib/run-client.js).
-  showOutput(await startRun(tab.id, els.code.value).result);
-  els.run.disabled = false;
+  currentRun = startRun(tab.id, els.code.value, { timeout: timeoutSeconds(els.timeout.value) });
+  // `result` always arrives, even if the run was stopped or lost (see lib/run-client.js).
+  showOutput(await currentRun.result);
+  currentRun = null;
+  els.stop.hidden = true;
+  els.run.hidden = false;
 });
+
+els.stop.addEventListener("click", () => currentRun?.stop());
 
 els.save.addEventListener("click", async () => {
   const saved = await saveScript({
@@ -67,6 +77,7 @@ els.save.addEventListener("click", async () => {
     name: els.name.value.trim() || "Untitled",
     match: els.match.value.trim(),
     enabled: els.enabled.checked,
+    timeout: timeoutSeconds(els.timeout.value),
     code: els.code.value,
   });
   currentId = saved.id;

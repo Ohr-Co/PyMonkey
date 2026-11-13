@@ -1,5 +1,6 @@
 // Saved scripts live in chrome.storage.local under one key.
-// A script: { id, name, match, code, enabled }
+// A script: { id, name, match, code, enabled, timeout }
+// (`timeout` is the time limit in seconds; scripts saved before it existed get the default.)
 
 const KEY = "scripts";
 

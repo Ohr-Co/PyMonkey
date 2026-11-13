@@ -64,3 +64,26 @@ test("only the most recent results are remembered", () => {
   assert.equal(queue.status("b").state, "done");
   assert.equal(queue.status("c").result.stdout, "c");
 });
+
+test("a waiting run can be cancelled; it gets its result and never starts", () => {
+  const { queue, started, finished } = makeQueue();
+  queue.add({ runId: "a" });
+  queue.add({ runId: "b" });
+  queue.add({ runId: "c" });
+
+  assert.equal(queue.cancel("b", { ok: false, error: "Stopped by user." }), true);
+  assert.deepEqual(queue.status("b"), { state: "done", result: { ok: false, error: "Stopped by user." } });
+  assert.deepEqual(finished, [["b", { ok: false, error: "Stopped by user." }]]);
+
+  queue.finishActive({ ok: true });
+  assert.deepEqual(started, ["a", "c"]);
+});
+
+test("cancel leaves the running run and unknown runs alone", () => {
+  const { queue, finished } = makeQueue();
+  queue.add({ runId: "a" });
+  assert.equal(queue.cancel("a", { ok: false }), false);
+  assert.equal(queue.cancel("nope", { ok: false }), false);
+  assert.deepEqual(queue.status("a"), { state: "running" });
+  assert.deepEqual(finished, []);
+});

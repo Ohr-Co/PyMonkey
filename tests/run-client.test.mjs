@@ -35,7 +35,7 @@ test("resolves with the result announced by run-finished", async (t) => {
   const bg = fakeBackground(t, { "run-in-tab": { ok: true }, "run-status": { state: "running" } });
   const run = startRun(7, "print(1)", bg.options);
   assert.equal(await run.started, true);
-  assert.deepEqual(bg.sent[0], { type: "run-in-tab", runId: run.runId, tabId: 7, code: "print(1)" });
+  assert.deepEqual(bg.sent[0], { type: "run-in-tab", runId: run.runId, tabId: 7, code: "print(1)", timeout: undefined });
 
   bg.emit({ target: "panel", type: "run-finished", runId: "someone-else", result: { ok: false } });
   bg.emit({ target: "panel", type: "run-finished", runId: run.runId, result: OK });
@@ -83,4 +83,28 @@ test("a start request that throws is reported the same way", async (t) => {
   const bg = fakeBackground(t, { "run-in-tab": () => Promise.reject(new Error("message channel closed")) });
   const result = await startRun(1, "", bg.options).result;
   assert.deepEqual(result, { ok: false, stdout: "", error: "message channel closed" });
+});
+
+test("the time limit is sent along with the start request", async (t) => {
+  const bg = fakeBackground(t, { "run-in-tab": { ok: false } });
+  const run = startRun(7, "print(1)", { ...bg.options, timeout: 600 });
+  await run.result;
+  assert.deepEqual(bg.sent[0], { type: "run-in-tab", runId: run.runId, tabId: 7, code: "print(1)", timeout: 600 });
+});
+
+test("stop() asks for this run to be stopped; the result arrives as usual", async (t) => {
+  const stopped = { ok: false, stdout: "", error: "Stopped by user." };
+  const bg = fakeBackground(t, {
+    "run-in-tab": { ok: true },
+    "run-status": { state: "running" },
+    "stop-run": (msg) => {
+      bg.emit({ target: "panel", type: "run-finished", runId: msg.runId, result: stopped });
+      return { ok: true };
+    },
+  });
+  const run = startRun(1, "while True: pass", bg.options);
+  await run.started;
+  await run.stop();
+  assert.deepEqual(await run.result, stopped);
+  assert.deepEqual(bg.sent.at(-1), { type: "stop-run", runId: run.runId });
 });

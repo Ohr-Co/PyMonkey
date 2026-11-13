@@ -72,6 +72,7 @@ async function sendToTab(tabId, message) {
 //   2. finish  offscreen -> background -> panel       "run-finished", a new message that
 //                                                     wakes this worker up if it was stopped
 //   3. check   panel -> background -> offscreen       "run-status", asked every few seconds
+//   (and "stop-run", panel -> background -> offscreen, if the user presses Stop)
 //
 // The offscreen document remembers recent results, so step 3 recovers a
 // "run-finished" that nobody heard, and reports a run that no longer exists
@@ -81,9 +82,10 @@ async function sendToTab(tabId, message) {
 // the messages as `runId` and `meta` and is kept by the offscreen document.
 // Nothing about it is stored here.
 
-async function startRun(tabId, code, runId, meta = {}) {
+// `timeout` is the script's time limit in seconds (see lib/timeout.js).
+async function startRun({ tabId, code, timeout, runId, meta = {} }) {
   try {
-    return await sendToOffscreen({ type: "run", runId, tabId, code, meta });
+    return await sendToOffscreen({ type: "run", runId, tabId, code, timeout, meta });
   } catch (err) {
     return { ok: false, error: `PyMonkey could not start the script: ${err.message}` };
   }
@@ -104,7 +106,7 @@ async function autoRun(tabId, url) {
     // Matching scripts are queued in this order; the offscreen document runs them one at a time.
     const runId = crypto.randomUUID();
     const meta = { auto: true, scriptId: script.id, name: script.name, url };
-    const started = await startRun(tabId, script.code, runId, meta);
+    const started = await startRun({ tabId, code: script.code, timeout: script.timeout, runId, meta });
     if (!started?.ok) runFinished({ runId, meta, result: { ok: false, stdout: "", error: started?.error } });
   }
 }
@@ -116,7 +118,10 @@ const handlers = {
   "page-ready": (msg, sender) => (sender.tab ? autoRun(sender.tab.id, msg.url) : undefined),
 
   // panel -> "Run on this page" (answers as soon as the run is queued)
-  "run-in-tab": (msg) => startRun(msg.tabId, msg.code, msg.runId),
+  "run-in-tab": (msg) => startRun(msg),
+
+  // panel -> the Stop button
+  "stop-run": (msg) => sendToOffscreen({ type: "stop-run", runId: msg.runId }),
 
   // panel -> is this run queued, running, done or unknown?
   "run-status": (msg) => sendToOffscreen({ type: "run-status", runId: msg.runId }),
