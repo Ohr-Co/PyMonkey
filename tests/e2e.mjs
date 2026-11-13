@@ -222,7 +222,8 @@ try {
 
   // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
   //    one after the other. The first is cut off by its own 1-second time limit;
-  //    the third must see what the second one changed.
+  //    the third must see what the second one changed; the fourth prints a lot.
+  //    The panel is closed first: auto-run must not depend on it.
   await panel.evaluate(async (match) => {
     const second = `first = page.select_one("body").get("data-pymonkey")\nawait page.set_attr("body", "data-second", f"saw-{first}")`;
     await chrome.storage.local.set({
@@ -230,12 +231,90 @@ try {
         { id: "t0", name: "stuck", enabled: true, match, timeout: 1, code: `while True: pass` },
         { id: "t1", name: "auto", enabled: true, match, code: `await page.set_attr("body", "data-pymonkey", "ran")` },
         { id: "t2", name: "auto 2", enabled: true, match, code: second },
+        { id: "t3", name: "chatty", enabled: true, match, code: `print("x" * 300_000)\nprint("the end")` },
       ],
     });
   }, pageUrl + "*");
+  await panel.close();
+  const reloadedAt = Date.now();
   await page.reload();
   await page.waitForSelector("body[data-pymonkey=ran][data-second=saw-ran]", { timeout: 15_000 });
   console.log("ok  saved scripts auto-run in order on matching URL");
+
+  // 10. Each script's last automatic run was kept while the panel was closed.
+  const panel2 = await browser.newPage();
+  await panel2.goto(`chrome-extension://${extensionId}/panel/panel.html`);
+  const keys = ["t0", "t1", "t2", "t3"].map((id) => `lastRun:${id}`);
+  await panel2.waitForFunction(
+    async (keys) => Object.keys(await chrome.storage.local.get(keys)).length === keys.length,
+    { timeout: 15_000 },
+    keys,
+  );
+  const lastRuns = await panel2.evaluate((keys) => chrome.storage.local.get(keys), keys);
+  const stuck = lastRuns["lastRun:t0"];
+  assert.equal(stuck.ok, false);
+  assert.match(stuck.error, /ran longer than 1s/);
+  assert.equal(stuck.url, pageUrl);
+  assert.ok(stuck.time >= reloadedAt && stuck.time <= Date.now(), `odd time ${stuck.time}`);
+  assert.deepEqual(
+    { ...lastRuns["lastRun:t1"], time: 0 },
+    { time: 0, url: pageUrl, ok: true, stdout: "", error: null, seen: false },
+  );
+  //     Stored output is capped: the 300,000 characters were cut to the last 20,000.
+  const chatty = lastRuns["lastRun:t3"].stdout;
+  assert.ok(chatty.length < 21_000, `stored ${chatty.length} characters`);
+  assert.match(chatty, /^\[… \d+ earlier characters not kept\]\nx+\nthe end\n$/);
+  console.log("ok  last automatic runs are stored, output capped");
+
+  //     The failure shows on the toolbar icon, without the panel or developer tools...
+  const badgeIs = (text) =>
+    panel2.waitForFunction(async (text) => (await chrome.action.getBadgeText({})) === text, { timeout: 5_000 }, text);
+  await badgeIs("1");
+  assert.match(await panel2.evaluate(() => chrome.action.getTitle({})), /1 script failed/);
+  //     ...the list in the panel says which script it was...
+  const names = await panel2.$$eval("#script-list option", (options) => options.map((o) => o.textContent));
+  assert.deepEqual(names, ["(unsaved script)", "stuck (failed)", "auto", "auto 2", "chatty"]);
+  assert.equal(await panel2.$eval("#last-run", (el) => el.hidden), true); // nothing selected yet
+  //     ...and selecting it shows the run. Having been seen, it leaves the badge.
+  const lastRunShown = async (scriptId) => {
+    await panel2.select("#script-list", scriptId);
+    await panel2.waitForFunction(
+      (name) => document.getElementById("name").value === name && !document.getElementById("last-run").hidden,
+      { timeout: 5_000 },
+      await panel2.$eval(`#script-list option[value=${scriptId}]`, (o) => o.textContent.replace(" (failed)", "")),
+    );
+    return panel2.evaluate(() => ({
+      summary: document.getElementById("last-run-summary").textContent,
+      url: document.getElementById("last-run-url").textContent,
+      output: document.getElementById("last-run-output").textContent,
+      open: document.getElementById("last-run").open,
+    }));
+  };
+  let lastRun = await lastRunShown("t0");
+  assert.equal(lastRun.summary, `Last automatic run failed · ${new Date(stuck.time).toLocaleString()}`);
+  assert.equal(lastRun.url, pageUrl);
+  assert.match(lastRun.output, /ran longer than 1s/);
+  assert.equal(lastRun.open, true);
+  await badgeIs("");
+  lastRun = await lastRunShown("t3");
+  assert.match(lastRun.summary, /^Last automatic run succeeded · /);
+  assert.match(lastRun.output, /the end\n$/);
+  assert.equal(lastRun.open, false);
+  console.log("ok  failed auto-run: badge on the toolbar icon, details in the panel");
+
+  //     A new failure brings the badge back; deleting the script removes its last run.
+  await page.reload();
+  await badgeIs("1");
+  await panel2.select("#script-list", "t1");
+  await panel2.waitForFunction(() => document.getElementById("name").value === "auto");
+  await badgeIs("1"); // looking at another script does not clear it
+  await panel2.evaluate(async () => {
+    const { deleteScript } = await import("/lib/storage.js");
+    await deleteScript("t0");
+  });
+  await badgeIs("");
+  assert.deepEqual(await panel2.evaluate(() => chrome.storage.local.get("lastRun:t0")), {});
+  console.log("ok  badge returns on a new failure, a deleted script takes its last run along");
 
   console.log("\nAll end-to-end checks passed.");
 } finally {
