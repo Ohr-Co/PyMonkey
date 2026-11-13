@@ -14,6 +14,11 @@ page.set_style("h1", "background: yellow")
 page.click("button.load-more")
 ```
 
+<p>
+  <img src="docs/screenshots/panel-light.png" width="300" alt="The PyMonkey side panel: a list of saved scripts, the code editor, a Run button and the script's output">
+  <img src="docs/screenshots/panel-dark-running.png" width="300" alt="The same panel in dark mode while a script runs, with a Stop button in place of Run">
+</p>
+
 > **Status:** early skeleton. The full loop works (write a script, run it on a page, auto-run on matching URLs), but expect rough edges. Chrome/Chromium only for now.
 
 ## Quick start
@@ -118,7 +123,9 @@ The panel's **editor** colors Python as you type, in light and dark mode. Enter 
 
 What you type is not lost when the panel closes: the panel reopens with the script you were working on, changes you had not saved included. Saved scripts only change when you press **Save**.
 
-`print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
+`print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once. The line at the top of the panel says what Python is doing: **Loading Python…** when the panel first opens, then **Ready**, **Running…** during a run, and after a run that did not finish **Stopped** (by you or by the time limit) or **Script failed**.
+
+From the keyboard, **Ctrl+Enter** runs the script and **Ctrl+S** saves it (**Cmd** instead of Ctrl on a Mac), wherever in the panel you are typing. Under the list of scripts, the panel says whether the script you are looking at is saved: "Not saved", "Unsaved changes" or "Saved". The panel follows your system's light or dark mode.
 
 Each script has a **time limit**, 30 seconds unless you change it in the panel. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
 
@@ -252,11 +259,12 @@ extension/
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
   panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
-  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files
+  lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended
   vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
 scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
 scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
 examples/                    sample scripts
+docs/screenshots/            pictures of the panel, for this file
 tests/                       unit tests + end-to-end test
 ```
 

@@ -5,6 +5,7 @@ import { createEditor } from "./editor.js";
 import { formToRestore, hasChanges, loadDraft, saveDraft, scriptFields } from "../lib/draft.js";
 import { MAX_FILE_BYTES, fileNameFor, formatScriptFile, importedScript, importNotice } from "../lib/script-file.js";
 import { startRun } from "../lib/run-client.js";
+import { runState } from "../lib/run-state.js";
 import { describeLastRun, isLastRunKey } from "../lib/last-run.js";
 import { getScripts, getLastRuns, saveScript, deleteScript, markLastRunSeen } from "../lib/storage.js";
 import { timeoutSeconds } from "../lib/timeout.js";
@@ -14,7 +15,7 @@ const els = {
   status: $("status"), list: $("script-list"), name: $("name"), match: $("match"),
   enabled: $("enabled"), timeout: $("timeout"), output: $("output"),
   run: $("run"), stop: $("stop"), save: $("save"), del: $("delete"), newBtn: $("new"),
-  importBtn: $("import"), importFile: $("import-file"), exportBtn: $("export"),
+  importBtn: $("import"), importFile: $("import-file"), exportBtn: $("export"), saveState: $("save-state"),
   lastRun: $("last-run"), lastRunSummary: $("last-run-summary"),
   lastRunUrl: $("last-run-url"), lastRunOutput: $("last-run-output"),
 };
@@ -29,7 +30,8 @@ for link in page.select("a[href]")[:10]:
 `;
 
 let currentId = null; // id of the script being edited, or null for an unsaved one
-let currentRun = null; // the run started with the Run button, while it is in flight
+let running = false; // true from the moment Run is pressed until its result is shown
+let currentRun = null; // that run, once it has been started (it has the stop() to end it)
 let shownLastRun = null; // which last run the panel is showing ("<script id>:<time>")
 let savedScripts = []; // the saved scripts, as of the last refreshList()
 
@@ -37,10 +39,19 @@ const editor = createEditor({ parent: $("code"), onChange: rememberDraft });
 
 const toBackground = (message) => chrome.runtime.sendMessage({ ...message, target: "background" });
 
+// The status line in the header. `state` is one of loading, ready, running,
+// stopped, error; panel.css draws the dot that goes with each.
+function setStatus(state, text) {
+  els.status.dataset.state = state; // data-state="..." in the HTML
+  els.status.textContent = text;
+}
+
+// Show a result ({ ok, stdout, error }) in the output pane.
 function showOutput(result) {
   const text = [result.stdout, result.error].filter(Boolean).join("\n");
   els.output.textContent = text || "(no output)";
   els.output.classList.toggle("error", !result.ok);
+  els.output.dataset.state = runState(result); // done, stopped or error
 }
 
 // The state of the panel's fields: the script as it is being edited.
@@ -67,6 +78,14 @@ function hasUnsavedWork() {
 // closed and opened again (see lib/draft.js). Called on every change.
 function rememberDraft() {
   saveDraft(readForm(), savedScripts.find((s) => s.id === currentId));
+  showSaveState();
+}
+
+// Say whether what is in the fields is saved.
+function showSaveState() {
+  const unsaved = hasUnsavedWork();
+  if (currentId) els.saveState.textContent = unsaved ? "Unsaved changes" : "Saved";
+  else els.saveState.textContent = unsaved ? "Not saved" : ""; // a new script nobody typed in yet: nothing to say
 }
 
 // Show a script (or a restored draft, or with null a new script) in the fields.
@@ -117,34 +136,84 @@ async function refreshList(selectId = currentId) {
 
 // ---------- buttons ----------
 
-els.run.addEventListener("click", async () => {
+// While a script runs, the Run button is replaced by Stop. If the keyboard
+// was on the button that goes away, it moves to the one that takes its place.
+function swapRunButton(showStop) {
+  const [from, to] = showStop ? [els.run, els.stop] : [els.stop, els.run];
+  const hadFocus = document.activeElement === from;
+  from.hidden = true;
+  to.hidden = false;
+  if (hadFocus) to.focus();
+}
+
+// Run the code in the editor on the page the user is looking at.
+async function run() {
+  if (running) return; // one at a time
+  running = true;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) return showOutput({ ok: false, error: "No active tab found." });
-  // While the script runs, the Run button is replaced by Stop.
-  els.run.hidden = true;
-  els.stop.hidden = false;
-  els.output.classList.remove("error");
-  els.output.textContent = "Running…";
-  currentRun = startRun(tab.id, editor.getText(), {
-    timeout: timeoutSeconds(els.timeout.value),
-    scriptId: currentId, // null for an unsaved script, which has no page.store
-  });
-  // `result` always arrives, even if the run was stopped or lost (see lib/run-client.js).
-  showOutput(await currentRun.result);
-  currentRun = null;
-  els.stop.hidden = true;
-  els.run.hidden = false;
-});
 
-els.stop.addEventListener("click", () => currentRun?.stop());
+  let result = { ok: false, stdout: "", error: "No active tab found." };
+  if (tab) {
+    // The run is started before Stop is shown, so that Stop always has a run to stop.
+    currentRun = startRun(tab.id, editor.getText(), {
+      timeout: timeoutSeconds(els.timeout.value),
+      scriptId: currentId, // null for an unsaved script, which has no page.store
+    });
+    swapRunButton(true);
+    setStatus("running", "Running…");
+    els.output.classList.remove("error");
+    els.output.dataset.state = "running";
+    els.output.textContent = "Running…";
+    // `result` always arrives, even if the run was stopped or lost (see lib/run-client.js).
+    result = await currentRun.result;
+    currentRun = null;
+  }
 
-els.save.addEventListener("click", async () => {
+  showOutput(result);
+  const state = runState(result);
+  if (state === "done") setStatus("ready", "Ready");
+  else if (state === "stopped") setStatus("stopped", "Stopped");
+  else setStatus("error", "Script failed");
+  if (els.run.hidden) swapRunButton(false);
+  running = false;
+}
+
+async function save() {
   const saved = await saveScript({ id: currentId ?? undefined, ...scriptFields(readForm()) });
   currentId = saved.id;
   await refreshList();
   rememberDraft(); // the draft now belongs to a saved script, and has no changes
   await showLastRun();
-});
+}
+
+els.run.addEventListener("click", run);
+els.stop.addEventListener("click", () => currentRun?.stop());
+els.save.addEventListener("click", save);
+
+// Keyboard shortcuts, wherever in the panel the keyboard is: Ctrl+Enter runs
+// and Ctrl+S saves (Cmd instead of Ctrl on a Mac, though either works).
+// The `true` at the end asks to hear about a key before the element that has
+// the focus does. The editor has its own use for Ctrl+Enter, and Chrome for
+// Ctrl+S ("save this page"); preventDefault and stopPropagation keep both from happening.
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    const action = event.key === "Enter" ? run : event.key.toLowerCase() === "s" ? save : null;
+    if (!action) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) action(); // a key held down counts once
+  },
+  true,
+);
+
+// Show the shortcuts on the buttons, in the words of the keyboard at hand.
+const mod = /Mac/.test(navigator.platform) ? "⌘" : "Ctrl+";
+els.run.querySelector("kbd").textContent = `${mod}↵`;
+els.save.querySelector("kbd").textContent = `${mod}S`;
+els.run.title = `Run the script on the page in this tab (${mod}Enter)`;
+els.save.title = `Save the script (${mod}S)`;
 
 els.del.addEventListener("click", async () => {
   if (currentId) await deleteScript(currentId);
@@ -204,6 +273,7 @@ els.importFile.addEventListener("change", async () => {
   }
   els.output.textContent = notices.join("\n");
   els.output.classList.toggle("error", failed);
+  els.output.dataset.state = failed ? "error" : "done";
 });
 
 // Typing in any field changes the draft. (The editor reports its own changes: see createEditor above.)
@@ -236,12 +306,15 @@ refreshList(null).then((scripts) => {
 // already paid by the time the user clicks Run.
 toBackground({ type: "warm" })
   .then((res) => {
-    els.status.textContent = res?.ok ? "Python ready" : "Python failed to load";
-    els.status.classList.add(res?.ok ? "ready" : "error");
-    if (!res?.ok) showOutput({ ok: false, error: res?.error ?? "Unknown error. Did you run `npm run setup`?" });
+    if (res?.ok) {
+      // (A run that was started in the meantime has put its own status up.)
+      if (els.status.dataset.state === "loading") setStatus("ready", "Ready");
+      return;
+    }
+    setStatus("error", "Python failed to load");
+    showOutput({ ok: false, error: res?.error ?? "Unknown error. Did you run `npm run setup`?" });
   })
   .catch((err) => {
-    els.status.textContent = "Python failed to load";
-    els.status.classList.add("error");
+    setStatus("error", "Python failed to load");
     showOutput({ ok: false, error: String(err?.message ?? err) });
   });
