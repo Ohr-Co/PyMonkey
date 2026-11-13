@@ -35,7 +35,9 @@ test("resolves with the result announced by run-finished", async (t) => {
   const bg = fakeBackground(t, { "run-in-tab": { ok: true }, "run-status": { state: "running" } });
   const run = startRun(7, "print(1)", bg.options);
   assert.equal(await run.started, true);
-  assert.deepEqual(bg.sent[0], { type: "run-in-tab", runId: run.runId, tabId: 7, code: "print(1)", timeout: undefined });
+  assert.deepEqual(bg.sent[0], {
+    type: "run-in-tab", runId: run.runId, tabId: 7, scriptId: null, code: "print(1)", timeout: undefined,
+  });
 
   bg.emit({ target: "panel", type: "run-finished", runId: "someone-else", result: { ok: false } });
   bg.emit({ target: "panel", type: "run-finished", runId: run.runId, result: OK });
@@ -85,11 +87,13 @@ test("a start request that throws is reported the same way", async (t) => {
   assert.deepEqual(result, { ok: false, stdout: "", error: "message channel closed" });
 });
 
-test("the time limit is sent along with the start request", async (t) => {
+test("the time limit and the script's id are sent along with the start request", async (t) => {
   const bg = fakeBackground(t, { "run-in-tab": { ok: false } });
-  const run = startRun(7, "print(1)", { ...bg.options, timeout: 600 });
+  const run = startRun(7, "print(1)", { ...bg.options, timeout: 600, scriptId: "s1" });
   await run.result;
-  assert.deepEqual(bg.sent[0], { type: "run-in-tab", runId: run.runId, tabId: 7, code: "print(1)", timeout: 600 });
+  assert.deepEqual(bg.sent[0], {
+    type: "run-in-tab", runId: run.runId, tabId: 7, scriptId: "s1", code: "print(1)", timeout: 600,
+  });
 });
 
 test("stop() asks for this run to be stopped; the result arrives as usual", async (t) => {

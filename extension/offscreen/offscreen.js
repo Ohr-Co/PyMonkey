@@ -5,7 +5,7 @@
 //
 // Its jobs:
 //   * queue run requests from the background and feed them to the worker one at a time
-//   * pass the worker's DOM requests back out (workers have no chrome.* APIs)
+//   * pass Python's requests for the page or for saved values back out (workers have no chrome.* APIs)
 //   * kill the worker when a script passes its time limit or the user presses Stop;
 //     the next request starts a new one
 //   * announce each result to the background, and keep it for anyone who asks later
@@ -14,6 +14,7 @@ import { createRunQueue } from "../lib/run-queue.js";
 import { timeoutSeconds } from "../lib/timeout.js";
 
 const SNAPSHOT_TIMEOUT_MS = 15_000;
+const SERVICES = ["dom", "store"]; // what Python may ask the background for
 
 let worker = null;
 let activeTimeout = 0; // time limit, in seconds, of the run that is executing (0 = none)
@@ -94,11 +95,17 @@ function onWorkerMessage(data) {
     } else if (runs.isActive(data.id)) {
       finishRun(data.result);
     }
-  } else if (data.type === "dom") {
-    // Python asked to touch the page. Relay: offscreen -> background -> tab.
-    toBackground({ type: "dom", tabId: data.tabId, op: data.op, args: data.args })
+  } else if (data.type === "call") {
+    // Python asked for something only the extension can do. Relay it to the
+    // background as a message named after the service: "dom" (touch the page,
+    // background -> tab) or "store" (the script's saved values).
+    const { callId, service, ...request } = data;
+    const reply = SERVICES.includes(service)
+      ? toBackground({ ...request, type: service })
+      : Promise.reject(new Error(`Unknown service: ${service}`));
+    reply
       .catch((err) => ({ ok: false, error: String(err?.message ?? err) }))
-      .then((result) => worker?.postMessage({ type: "dom-result", callId: data.callId, result }));
+      .then((result) => worker?.postMessage({ type: "call-result", callId, result }));
   }
 }
 
@@ -128,7 +135,7 @@ async function startRun(run) {
   if (!runs.isActive(run.runId)) return; // stopped, or the worker crashed, while we were waiting for the page
   activeTimeout = timeoutSeconds(run.timeout);
   if (!worker) startWorker();
-  worker.postMessage({ type: "run", id: run.runId, tabId: run.tabId, code: run.code, page });
+  worker.postMessage({ type: "run", id: run.runId, tabId: run.tabId, scriptId: run.scriptId, code: run.code, page });
 }
 
 // The run that is executing is over, one way or another.
@@ -159,7 +166,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
   if (msg.type === "run") {
     // Answer at once: the result is announced later with "run-finished".
-    runs.add({ runId: msg.runId, tabId: msg.tabId, code: msg.code, timeout: msg.timeout, meta: msg.meta });
+    const { runId, tabId, scriptId, code, timeout, meta } = msg;
+    runs.add({ runId, tabId, scriptId, code, timeout, meta });
     sendResponse({ ok: true });
     return;
   }

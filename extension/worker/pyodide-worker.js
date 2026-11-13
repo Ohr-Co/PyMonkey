@@ -13,6 +13,25 @@ const PRELOADED_PACKAGES = ["beautifulsoup4"];
 
 const RUNTIME_MODULE = "pymonkey_runtime";
 
+// Python glue that only makes sense inside Pyodide, kept out of
+// pymonkey_runtime.py so that file still runs under normal CPython.
+//
+// make_sync turns a JavaScript function that returns a promise into a Python
+// function that waits for the promise and returns its value. This is what lets
+// scripts write `page.click(...)` without `await`. `run_sync` pauses the Python
+// call stack (not the worker: messages keep flowing) using JavaScript Promise
+// Integration, which Chrome has from version 137, the manifest's minimum.
+const MAKE_SYNC = `
+from pyodide.ffi import run_sync
+
+def make_sync(js_function):
+    def call(*args):
+        return run_sync(js_function(*args))
+    return call
+
+make_sync
+`;
+
 async function boot() {
   const pyodide = await loadPyodide({
     indexURL: new URL("../vendor/pyodide/", import.meta.url).href,
@@ -24,36 +43,51 @@ async function boot() {
   const sitePackages = pyodide.runPython("import site; site.getsitepackages()[0]");
   pyodide.FS.writeFile(`${sitePackages}/${RUNTIME_MODULE}.py`, source);
 
-  return pyodide.pyimport(RUNTIME_MODULE);
+  return { runtime: pyodide.pyimport(RUNTIME_MODULE), makeSync: pyodide.runPython(MAKE_SYNC) };
 }
 
 // Start loading immediately; every request awaits this same promise.
 const runtimeReady = boot();
 
-// ---------- DOM bridge: Python -> (offscreen -> background -> content script) ----------
+// ---------- bridge: Python -> offscreen -> background (-> content script) ----------
+//
+// Python cannot touch the page or the extension's storage from in here, so it
+// asks for it. `service` says who should do the work:
+//   "dom"    the page's content script (page.click(...) and friends)
+//   "store"  the script's saved values (page.store), kept by the background
 
 let nextCallId = 1;
-const domPending = new Map(); // callId -> resolve
+const callsPending = new Map(); // callId -> resolve
 
-/** Build the `dom_call(op, args_json)` function handed to Python for one run. */
-function makeDomCall(tabId) {
-  return (op, argsJson) =>
+/**
+ * Build the `host_call(service, op, args_json)` function for one run.
+ * It returns a promise of the reply. `context` is sent along with every call:
+ * the tab the script runs on and the id of the saved script, if it is one.
+ */
+function makeHostCall(context) {
+  return (service, op, argsJson) =>
     new Promise((resolve) => {
       const callId = nextCallId++;
-      domPending.set(callId, resolve);
-      self.postMessage({ type: "dom", callId, tabId, op, args: JSON.parse(argsJson) });
+      callsPending.set(callId, resolve);
+      self.postMessage({ type: "call", callId, service, ...context, op, args: JSON.parse(argsJson) });
     });
 }
 
 // ---------- message handling ----------
 
-async function handleRun({ id, tabId, code, page }) {
+async function handleRun({ id, tabId, scriptId, code, page }) {
   let result;
   try {
-    const runtime = await runtimeReady;
+    const { runtime, makeSync } = await runtimeReady;
     self.postMessage({ type: "started", id });
-    // runtime.run is `async def run(code, page_json, dom_call)` and returns JSON.
-    result = JSON.parse(await runtime.run(code, JSON.stringify(page), makeDomCall(tabId)));
+    // runtime.run is `async def run(code, page_json, host_call)` and returns JSON.
+    // Python gets a host_call that waits for the reply instead of returning a promise.
+    const hostCall = makeSync(makeHostCall({ tabId, scriptId }));
+    try {
+      result = JSON.parse(await runtime.run(code, JSON.stringify(page), hostCall));
+    } finally {
+      hostCall.destroy(); // release the Python function we were holding from JavaScript
+    }
   } catch (err) {
     result = { ok: false, stdout: "", error: `PyMonkey runtime error: ${err?.message ?? err}` };
   }
@@ -74,8 +108,8 @@ async function handleWarm({ id }) {
 self.onmessage = ({ data }) => {
   if (data.type === "run") handleRun(data);
   else if (data.type === "warm") handleWarm(data);
-  else if (data.type === "dom-result") {
-    domPending.get(data.callId)?.(JSON.stringify(data.result ?? { ok: false, error: "No reply from page" }));
-    domPending.delete(data.callId);
+  else if (data.type === "call-result") {
+    callsPending.get(data.callId)?.(JSON.stringify(data.result ?? { ok: false, error: "No reply from the extension" }));
+    callsPending.delete(data.callId);
   }
 };

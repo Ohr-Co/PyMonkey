@@ -7,9 +7,9 @@
 //
 // Every message carries a `target` so each context can ignore the others' mail.
 
-import { countUnseenFailures, makeLastRun } from "./lib/last-run.js";
+import { countUnseenFailures, isLastRunKey, makeLastRun } from "./lib/last-run.js";
 import { urlMatches } from "./lib/match.js";
-import { getLastRuns, getScripts, saveLastRun } from "./lib/storage.js";
+import { getLastRuns, getScripts, saveLastRun, scriptStoreCall } from "./lib/storage.js";
 
 const OFFSCREEN_URL = "offscreen/offscreen.html";
 
@@ -84,9 +84,11 @@ async function sendToTab(tabId, message) {
 // Nothing about it is stored here.
 
 // `timeout` is the script's time limit in seconds (see lib/timeout.js).
-async function startRun({ tabId, code, timeout, runId, meta = {} }) {
+// `scriptId` is the saved script the code belongs to, if any: it decides whose
+// `page.store` the run reads and writes.
+async function startRun({ tabId, scriptId, code, timeout, runId, meta = {} }) {
   try {
-    return await sendToOffscreen({ type: "run", runId, tabId, code, timeout, meta });
+    return await sendToOffscreen({ type: "run", runId, tabId, scriptId, code, timeout, meta });
   } catch (err) {
     return { ok: false, error: `PyMonkey could not start the script: ${err.message}` };
   }
@@ -112,7 +114,7 @@ async function autoRun(tabId, url) {
     // Matching scripts are queued in this order; the offscreen document runs them one at a time.
     const runId = crypto.randomUUID();
     const meta = { auto: true, scriptId: script.id, name: script.name, url };
-    const started = await startRun({ tabId, code: script.code, timeout: script.timeout, runId, meta });
+    const started = await startRun({ tabId, scriptId: script.id, code: script.code, timeout: script.timeout, runId, meta });
     if (!started?.ok) runFinished({ runId, meta, result: { ok: false, stdout: "", error: started?.error } });
   }
 }
@@ -138,8 +140,10 @@ async function updateBadge() {
   });
 }
 
-chrome.storage.onChanged.addListener((_changes, area) => {
-  if (area === "local") updateBadge().catch(console.error);
+chrome.storage.onChanged.addListener((changes, area) => {
+  // Only last runs and the list of scripts matter here, not what scripts keep in page.store.
+  const relevant = Object.keys(changes).some((key) => key === "scripts" || isLastRunKey(key));
+  if (area === "local" && relevant) updateBadge().catch(console.error);
 });
 // The badge is not kept across a browser restart or an extension update.
 chrome.runtime.onStartup.addListener(() => updateBadge().catch(console.error));
@@ -168,6 +172,9 @@ const handlers = {
 
   // offscreen -> Python wants to touch the page, or needs a snapshot of it
   dom: (msg) => sendToTab(msg.tabId, { type: "dom", op: msg.op, args: msg.args }),
+
+  // offscreen -> Python wants to read or change what the script saved (page.store)
+  store: (msg) => scriptStoreCall(msg.scriptId, msg.op, msg.args),
 };
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {

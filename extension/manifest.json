@@ -3,7 +3,7 @@
   "name": "PyMonkey",
   "version": "0.1.0",
   "description": "Run Python alongside any web page: scrape data, edit what you see, automate the page.",
-  "minimum_chrome_version": "116",
+  "minimum_chrome_version": "137",
   "permissions": ["storage", "offscreen", "sidePanel", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": {

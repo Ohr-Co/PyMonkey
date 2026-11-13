@@ -20,6 +20,8 @@ const failure = (error) => ({ ok: false, stdout: "", error });
 
 /**
  * `timeout` is the script's time limit in seconds (see lib/timeout.js).
+ * `scriptId` is the saved script the code belongs to (null for an unsaved one);
+ * it decides whose `page.store` the run uses.
  *
  * Returns { runId, started, result, stop }:
  *   started -- Promise<boolean>, true once the run was accepted
@@ -31,6 +33,7 @@ export function startRun(
   code,
   {
     timeout,
+    scriptId = null,
     send = (message) => chrome.runtime.sendMessage({ ...message, target: "background" }),
     events = chrome.runtime.onMessage,
     pollMs = POLL_MS,
@@ -70,7 +73,7 @@ export function startRun(
   // Listen before sending, so a script that finishes instantly is not missed.
   events.addListener(onMessage);
 
-  const started = send({ type: "run-in-tab", runId, tabId, code, timeout }).then(
+  const started = send({ type: "run-in-tab", runId, tabId, scriptId, code, timeout }).then(
     (reply) => {
       if (!reply?.ok) settle(failure(reply?.error ?? "PyMonkey could not start the script."));
       else if (!done) timer = setTimeout(poll, pollMs);
