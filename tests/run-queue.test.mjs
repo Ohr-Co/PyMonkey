@@ -87,3 +87,23 @@ test("cancel leaves the running run and unknown runs alone", () => {
   assert.deepEqual(queue.status("a"), { state: "running" });
   assert.deepEqual(finished, []);
 });
+
+test("the queue is empty when no run is executing or waiting", () => {
+  const { queue } = makeQueue();
+  assert.ok(queue.isEmpty());
+  queue.add({ runId: "a" });
+  queue.add({ runId: "b" });
+  assert.ok(!queue.isEmpty());
+  queue.finishActive({ ok: true }); // "b" starts
+  assert.ok(!queue.isEmpty());
+  queue.finishActive({ ok: true });
+  assert.ok(queue.isEmpty()); // finished results are remembered, but they are not work
+  assert.equal(queue.status("a").state, "done");
+
+  queue.add({ runId: "c" });
+  queue.add({ runId: "d" });
+  queue.cancel("d", { ok: false });
+  assert.ok(!queue.isEmpty());
+  queue.finishActive({ ok: true });
+  assert.ok(queue.isEmpty());
+});

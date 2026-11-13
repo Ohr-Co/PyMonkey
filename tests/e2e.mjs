@@ -359,6 +359,69 @@ try {
   assert.equal(result.stdout, "alive\n");
   console.log("ok  a lost run is reported, runtime recovers");
 
+  // 6b. Memory. Python stays loaded from one run to the next (a value left in
+  //     the `builtins` module is still there), but the page it was given does not.
+  const KEEP_SOUP = `import builtins, weakref
+builtins.pymonkey_soup = weakref.ref(page.soup)
+print(builtins.pymonkey_soup() is None)`;
+  result = await run(KEEP_SOUP); // a weak reference: it does not keep the tree alive, it only tells whether it still is
+  assert.deepEqual(result, { ok: true, stdout: "False\n", error: null });
+  const SAME_PYTHON = `import builtins
+print(hasattr(builtins, "pymonkey_soup"))`;
+  result = await run(`${SAME_PYTHON}
+print(builtins.pymonkey_soup() is None)`);
+  assert.deepEqual(result, { ok: true, stdout: "True\nTrue\n", error: null });
+  console.log("ok  the page snapshot is released when the run is over");
+
+  //     A run that makes Python's memory grow by more than 64 MB: Python is
+  //     started afresh behind it, which is the only way to give that back.
+  result = await run(`big = bytearray(100 * 1024 * 1024)
+print(len(big))`);
+  assert.deepEqual(result, { ok: true, stdout: "104857600\n", error: null });
+  result = await run(SAME_PYTHON);
+  assert.deepEqual(result, { ok: true, stdout: "False\n", error: null });
+  console.log("ok  Python is restarted after a run that needed a lot of memory");
+
+  //     With nothing to do, the runtime page closes itself: after five minutes,
+  //     or after the two seconds this one is opened with.
+  const runtimePages = () =>
+    panel.evaluate(async () => {
+      const pages = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] });
+      return pages.map((context) => new URL(context.documentUrl).pathname + new URL(context.documentUrl).search);
+    });
+  const pythonWorkers = () => browser.targets().filter((t) => t.url().endsWith("/worker/pyodide-worker.js")).length;
+  assert.deepEqual(await runtimePages(), ["/offscreen/offscreen.html"]);
+  await panel.evaluate(async () => {
+    await chrome.offscreen.closeDocument();
+    await chrome.offscreen.createDocument({
+      url: "offscreen/offscreen.html?idle=2",
+      reasons: ["WORKERS"],
+      justification: "The runtime page, with a short idle period for the test.",
+    });
+  });
+  //     A run is not "nothing to do", however long it takes.
+  result = await run(`import asyncio
+await asyncio.sleep(4)
+print("not interrupted")`);
+  assert.deepEqual(result, { ok: true, stdout: "not interrupted\n", error: null });
+  const finishedAt = Date.now();
+  assert.deepEqual(await runtimePages(), ["/offscreen/offscreen.html?idle=2"]);
+  assert.equal(pythonWorkers(), 1);
+  while ((await runtimePages()).length > 0) {
+    assert.ok(Date.now() - finishedAt < 10_000, "the runtime page is still open 10 seconds after its last run");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(Date.now() - finishedAt >= 1_500, "the runtime page closed before its idle period was over");
+  assert.equal(pythonWorkers(), 0);
+  console.log("ok  the runtime shuts down when it has had nothing to do for a while");
+
+  //     The next run opens a new one (with the ordinary idle period) and loads Python again.
+  result = await run(`print(len(page.select("a")))`);
+  assert.deepEqual(result, { ok: true, stdout: "2\n", error: null });
+  assert.deepEqual(await runtimePages(), ["/offscreen/offscreen.html"]);
+  assert.equal(pythonWorkers(), 1);
+  console.log("ok  the runtime is loaded again when a script needs it");
+
   //    Optional, takes six minutes (E2E_LONG=1): a script with no time limit
   //    that runs past the 5 minutes Chrome allows the background worker for
   //    any single request, touching the page along the way.

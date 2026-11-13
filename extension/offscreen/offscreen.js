@@ -1,7 +1,7 @@
 // Offscreen document: owns the Pyodide web worker and keeps it warm.
-// Unlike the background service worker, this page is NOT killed when idle,
-// so Python stays loaded between runs. For the same reason it is the place
-// that remembers which runs are queued, running and finished.
+// Unlike the background service worker, this page is NOT killed by Chrome
+// when idle, so Python stays loaded between runs. For the same reason it is
+// the place that remembers which runs are queued, running and finished.
 //
 // Its jobs:
 //   * queue run requests from the background and feed them to the worker one at a time
@@ -9,7 +9,11 @@
 //   * kill the worker when a script passes its time limit or the user presses Stop;
 //     the next request starts a new one
 //   * announce each result to the background, and keep it for anyone who asks later
+//   * give memory back: replace the worker after a run that needed a lot, and
+//     close this whole document when nobody has asked for Python for a while
+//     (the background opens a new one when Python is next needed)
 
+import { createIdleTimer, grownTooLarge, idleSeconds } from "../lib/memory.js";
 import { createRunQueue } from "../lib/run-queue.js";
 import { STOPPED_BY_USER, overTimeLimit } from "../lib/run-state.js";
 import { timeoutSeconds } from "../lib/timeout.js";
@@ -26,6 +30,32 @@ const warmPending = new Map(); // id -> resolve
 const toBackground = (message) => chrome.runtime.sendMessage({ ...message, target: "background" });
 
 const runs = createRunQueue({ start: startRun, onFinished: announce });
+
+// ---------- closing when idle ----------
+//
+// Python loaded and doing nothing still holds about a hundred megabytes (see
+// docs/memory.md). So this document counts down whenever it has no work, and
+// closes itself at zero.
+// With it gone and the service worker stopped (which Chrome does after 30
+// seconds), nothing of PyMonkey is left running until it is needed again.
+// What is lost is the list of recent results, which by then nobody is waiting for.
+
+let closing = false;
+const idle = createIdleTimer({ seconds: idleSeconds(location.search), onIdle: shutDown });
+
+// Call after anything that happens here: it starts the countdown from the top,
+// or switches it off while a run is queued or executing or Python is loading for someone.
+function touch() {
+  idle.update(!runs.isEmpty() || warmPending.size > 0);
+}
+
+function shutDown() {
+  // Closing takes a moment. A message that arrives during it gets no answer,
+  // which tells the background to open a new document and send it there.
+  closing = true;
+  worker?.terminate();
+  window.close();
+}
 
 // ---------- the worker ----------
 
@@ -49,6 +79,14 @@ function startWorker() {
   };
 }
 
+// Swap the worker for a new one. Whoever is waiting for Python to load keeps
+// waiting, on the new one.
+function restartWorker() {
+  worker?.terminate();
+  startWorker();
+  for (const id of warmPending.keys()) worker.postMessage({ type: "warm", id });
+}
+
 // End the run that is executing by killing the worker: the only way to stop
 // Python that is busy (e.g. `while True: pass`). The next run gets a fresh worker.
 function killRun(reason) {
@@ -56,10 +94,7 @@ function killRun(reason) {
   worker = null;
   finishRun({ ok: false, stdout: "", error: reason });
   // Python was fine, so anyone waiting for it to load keeps waiting, on a new worker.
-  if (warmPending.size > 0) {
-    if (!worker) startWorker();
-    for (const id of warmPending.keys()) worker.postMessage({ type: "warm", id });
-  }
+  if (warmPending.size > 0) restartWorker();
 }
 
 // The user pressed Stop.
@@ -89,8 +124,14 @@ function onWorkerMessage(data) {
     if (warmPending.has(data.id)) {
       warmPending.get(data.id)(data.result);
       warmPending.delete(data.id);
+      touch();
     } else if (runs.isActive(data.id)) {
+      // A run that made Python's memory grow a lot (a very large page, say)
+      // leaves it that large. The run is over, so nothing is lost by starting
+      // Python afresh, and it is loaded again by the time it is next needed.
+      const restart = grownTooLarge(data.heap);
       finishRun(data.result);
+      if (restart) restartWorker();
     }
   } else if (data.type === "call") {
     // Python asked for something only the extension can do. Relay it to the
@@ -140,6 +181,7 @@ function finishRun(result) {
   clearTimeout(runTimer);
   runTimer = null;
   runs.finishActive(result); // calls announce(), then starts the next queued run
+  touch();
 }
 
 // Called by the queue with each result. The background passes it on to the
@@ -155,32 +197,36 @@ function withTimeout(promise, ms, message) {
 
 // ---------- messages from the background ----------
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.target !== "offscreen") return;
+// Returns true if the answer will be sent later.
+function onMessage(msg, sendResponse) {
   if (msg.type === "ping") {
     sendResponse({ ok: true });
-    return;
-  }
-  if (msg.type === "run") {
+  } else if (msg.type === "run") {
     // Answer at once: the result is announced later with "run-finished".
     const { runId, tabId, scriptId, code, timeout, meta } = msg;
     runs.add({ runId, tabId, scriptId, code, timeout, meta });
     sendResponse({ ok: true });
-    return;
-  }
-  if (msg.type === "stop-run") {
+  } else if (msg.type === "stop-run") {
     stopRun(msg.runId);
     sendResponse({ ok: true });
-    return;
-  }
-  if (msg.type === "run-status") {
+  } else if (msg.type === "run-status") {
     sendResponse(runs.status(msg.runId));
-    return;
-  }
-  if (msg.type === "warm") {
+  } else if (msg.type === "warm") {
     warm().then(sendResponse);
     return true;
   }
+  return false;
+}
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg?.target !== "offscreen" || closing) return;
+  const answerLater = onMessage(msg, sendResponse);
+  // Every message counts as something happening, "ping" too. The background
+  // sends that just before each real message, so the message that follows
+  // always has a full idle period in hand.
+  touch();
+  return answerLater;
 });
 
 startWorker();
+touch();

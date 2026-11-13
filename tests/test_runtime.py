@@ -6,9 +6,11 @@
 import asyncio
 import base64
 import csv
+import gc
 import io
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -659,3 +661,82 @@ def test_download_failure_raises_page_error():
 def test_download_may_be_written_with_await():
     result, name, _, _ = downloaded("await page.download('links.csv', [{'a': 1}])")  # as in the issue's example
     assert result["ok"] and name == "links.csv"
+
+
+# ---------- letting go of the snapshot when a run is over ----------
+
+
+@pytest.fixture
+def probe():
+    """A module that a script can import to hand things to the test.
+
+    The script leaves weak references in it: a weak reference does not keep its
+    object alive, and gives None once the object has been freed.
+    """
+    module = types.ModuleType("pymonkey_probe")
+    sys.modules["pymonkey_probe"] = module
+    # Python's own garbage collector runs whenever it likes; with it switched
+    # off, anything freed during the test was freed by run() itself.
+    gc.collect()
+    gc.disable()
+    yield module
+    gc.enable()
+    del sys.modules["pymonkey_probe"]
+
+
+# What a script typically does with the page, and what makes it hard to free:
+# the tree's elements point at each other in circles, and so do a function and
+# the globals it was defined in.
+USE_THE_PAGE = """
+import weakref, pymonkey_probe
+links = page.select("a")
+def first_link():
+    return links[0]
+pymonkey_probe.page = weakref.ref(page)
+pymonkey_probe.soup = weakref.ref(page.soup)
+pymonkey_probe.link = weakref.ref(first_link())
+pymonkey_probe.function = weakref.ref(first_link)
+"""
+
+
+def test_snapshot_is_released_when_the_script_ends(probe):
+    result, _ = run(USE_THE_PAGE + "print(len(links))")
+    assert result == {"ok": True, "stdout": "2\n", "error": None}
+    assert probe.page() is None
+    assert probe.soup() is None
+    assert probe.link() is None
+    assert probe.function() is None
+
+
+def test_snapshot_is_released_when_the_script_fails(probe):
+    result, _ = run(USE_THE_PAGE + "1 / 0")
+    assert not result["ok"] and "ZeroDivisionError" in result["error"]
+    assert probe.page() is None
+    assert probe.soup() is None
+    assert probe.link() is None
+
+
+def test_snapshot_is_released_when_an_async_script_ends(probe):
+    result, _ = run(USE_THE_PAGE + "import asyncio\nawait asyncio.sleep(0)\nprint(first_link().text)")
+    assert result == {"ok": True, "stdout": "A\n", "error": None}
+    assert probe.page() is None
+    assert probe.soup() is None
+
+
+def test_snapshot_is_released_even_if_the_script_keeps_hold_of_the_page(probe):
+    # A function kept somewhere that outlives the run (here: the probe module)
+    # keeps the script's globals alive with it, and `page` is one of them.
+    run(USE_THE_PAGE + "pymonkey_probe.kept = page, first_link")
+    page, first_link = probe.kept
+    assert probe.soup() is None
+    assert probe.link() is None
+    assert page.html == ""
+    assert first_link.__globals__ == {}
+
+
+def test_a_page_read_again_with_refresh_is_released_too(probe):
+    fresh = {"url": PAGE["url"], "title": "Later", "html": "<html><body><p>new</p></body></html>"}
+    code = "page.refresh()\nimport weakref, pymonkey_probe\npymonkey_probe.soup = weakref.ref(page.soup)\nprint(page.select_one('p').text)"
+    result, _ = run(code, replies={"snapshot": {"ok": True, "value": fresh}})
+    assert result == {"ok": True, "stdout": "new\n", "error": None}
+    assert probe.soup() is None

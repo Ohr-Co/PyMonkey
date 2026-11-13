@@ -18,6 +18,7 @@ How a script sees the page:
 import ast
 import base64
 import csv
+import gc
 import inspect
 import io
 import json
@@ -399,6 +400,11 @@ class Page:
         self.url, self.title, self.html = info["url"], info["title"], info["html"]
         self._soup = None
 
+    def _release(self):
+        """Let go of the snapshot. Called by run() when the script is over."""
+        self.html = ""
+        self._soup = None
+
     # ---- saving (a file in the browser's Downloads folder) ----
 
     def download(self, filename, data):
@@ -482,11 +488,8 @@ async def run(code, page_json, host_call):
         output.append(sep.join(str(a) for a in args) + end)
 
     # Each run gets a fresh namespace, so scripts can't see each other's globals.
-    namespace = {
-        "__name__": "__main__",
-        "page": Page(json.loads(page_json), host_call),
-        "print": script_print,
-    }
+    page = Page(json.loads(page_json), host_call)
+    namespace = {"__name__": "__main__", "page": page, "print": script_print}
 
     error = None
     try:
@@ -503,6 +506,16 @@ async def run(code, page_json, host_call):
         # be awaited") does not say what to do about it.
         if isinstance(exc, TypeError) and "await" in str(exc):
             error += AWAIT_HINT
+    finally:
+        # The snapshot is the page's whole HTML, and the tree BeautifulSoup
+        # builds from it is many times larger: do not keep them until the next
+        # run. Dropping our references is not enough. The tree's elements point
+        # at each other in circles (parent to child and back), and so do a
+        # script's functions and its globals; Python frees such circles only
+        # when its garbage collector runs, so run it now.
+        page._release()
+        namespace.clear()
+        gc.collect()
 
     return json.dumps({"ok": error is None, "stdout": "".join(output), "error": error})
 
