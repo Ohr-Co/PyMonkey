@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, readdir, readFile, rm, writeFile, access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateRawSync } from "node:zlib";
 import { buildIndex, resolvePackages } from "../extension/lib/packages.js";
 
 // Packages to bundle (their dependencies are added automatically).
@@ -41,6 +42,32 @@ const dest = join(root, "extension", "vendor", "pyodide");
 
 const exists = (p) => access(p).then(() => true, () => false);
 const sha256 = (buf) => createHash("sha256").update(buf).digest("hex");
+
+// The files in a zip archive (a wheel is one) whose names pass `wanted`.
+// Just enough of the format for that: the directory at the end of the
+// archive lists each file and where its data starts.
+function unzip(zip, wanted) {
+  const end = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
+  if (end < 0) throw new Error("Not a zip file");
+  const count = zip.readUInt16LE(end + 10);
+  let at = zip.readUInt32LE(end + 16);
+  const found = [];
+  for (let i = 0; i < count; i++) {
+    const method = zip.readUInt16LE(at + 10);
+    const size = zip.readUInt32LE(at + 20);
+    const nameLength = zip.readUInt16LE(at + 28);
+    const extraLength = zip.readUInt16LE(at + 30);
+    const commentLength = zip.readUInt16LE(at + 32);
+    const local = zip.readUInt32LE(at + 42);
+    const name = zip.toString("utf8", at + 46, at + 46 + nameLength);
+    at += 46 + nameLength + extraLength + commentLength;
+    if (!wanted(name)) continue;
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    const raw = zip.subarray(start, start + size);
+    found.push({ name, data: method === 8 ? inflateRawSync(raw) : raw });
+  }
+  return found;
+}
 
 if (!(await exists(src))) {
   console.error("node_modules/pyodide not found. Run `npm install` first.");
@@ -83,6 +110,41 @@ for (const file of await readdir(dest)) {
 
 await writeFile(join(dest, "packages.json"), JSON.stringify(buildIndex(wanted, lock), null, 1));
 console.log(`  wrote     packages.json (${wanted.length} packages bundled)`);
+
+// The licenses of what was copied in, passed on with it as they ask:
+// Pyodide (MPL-2.0) and CPython (PSF) from their repositories, each package
+// from the license files inside its wheel. Downloads are kept in the folder,
+// named by version, so a second run works offline.
+const fetchText = async (file, url) => {
+  const target = join(dest, file);
+  if (await exists(target)) return readFile(target, "utf8");
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Download failed (${res.status}): ${url}`);
+  const text = await res.text();
+  await writeFile(target, text);
+  return text;
+};
+const section = (title, text) => `\n${"=".repeat(70)}\n${title}\n${"=".repeat(70)}\n\n${text.trim()}\n`;
+let pyLicenses = "This folder holds Pyodide, the Python standard library, and the packages below.\n";
+pyLicenses += section(
+  `Pyodide ${version} (pyodide.mjs, pyodide.asm.mjs, pyodide.asm.wasm)`,
+  await fetchText(`LICENSE-pyodide-${version}.txt`, `https://raw.githubusercontent.com/pyodide/pyodide/${version}/LICENSE`),
+);
+pyLicenses += section(
+  `Python ${lock.info.python} (inside pyodide.asm.wasm, and python_stdlib.zip)`,
+  await fetchText(`LICENSE-python-${lock.info.python}.txt`, `https://raw.githubusercontent.com/python/cpython/v${lock.info.python}/LICENSE`),
+);
+for (const pkg of [...wanted].sort((a, b) => a.name.localeCompare(b.name))) {
+  const files = unzip(await readFile(join(dest, pkg.file_name)), (name) =>
+    /\.dist-info\/(licenses\/.+|(LICEN[CS]E|COPYING|NOTICE|AUTHORS)[^/]*)$/i.test(name),
+  );
+  if (files.length === 0) throw new Error(`No license file in ${pkg.file_name}`);
+  for (const { name, data } of files) {
+    pyLicenses += section(`${pkg.name} ${pkg.version} (${pkg.file_name}): ${name.split(".dist-info/")[1]}`, data.toString("utf8"));
+  }
+}
+await writeFile(join(dest, "LICENSES.txt"), pyLicenses);
+console.log("  wrote     LICENSES.txt");
 
 // ---------- the code editor ----------
 //
