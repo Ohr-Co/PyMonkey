@@ -22,8 +22,47 @@ const HTML = `<!doctype html><title>Test page</title>
 <h1>Hello</h1><a href="/one">One</a><a href="/two">Two</a>
 <input id="q"><button id="btn" onclick="document.title='clicked'">Go</button>`;
 
-const server = http.createServer((_req, res) => res.end(HTML)).listen(0);
+// Besides the test page, the servers have a few addresses for page.fetch to call.
+// Note what is missing: CORS headers. A web page could not read these from another site.
+function serve(req, res) {
+  const path = new URL(req.url, "http://localhost").pathname;
+  if (path === "/slow") return; // never answers
+  if (path === "/login") {
+    res.setHeader("Set-Cookie", "session=secret; Path=/");
+    res.end("logged in");
+  } else if (path === "/missing") {
+    res.writeHead(404, "Not Found").end("nothing here");
+  } else if (path === "/bytes") {
+    res.end(Buffer.from(Array.from({ length: 256 }, (_, i) => i)));
+  } else if (path === "/latin1") {
+    res.setHeader("Content-Type", "text/plain; charset=ISO-8859-1");
+    res.end(Buffer.from("café", "latin1"));
+  } else if (path === "/echo") {
+    // Report the request as JSON.
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(
+        JSON.stringify({
+          method: req.method,
+          query: new URL(req.url, "http://localhost").search,
+          cookie: req.headers.cookie ?? null,
+          type: req.headers["content-type"] ?? null,
+          body: Buffer.concat(chunks).toString(),
+        }),
+      );
+    });
+  } else {
+    res.end(HTML);
+  }
+}
+
+const server = http.createServer(serve).listen(0);
 const pageUrl = `http://localhost:${server.address().port}/`;
+// "Another site": same machine, but a different host name, so a different origin with its own cookies.
+const otherServer = http.createServer(serve).listen(0);
+const otherUrl = `http://127.0.0.1:${otherServer.address().port}`;
 
 // The browser's profile folder is ours, so the browser can be closed and
 // started again with everything the extension stored still in place.
@@ -43,6 +82,9 @@ try {
   const extensionId = new URL(swTarget.url()).host;
 
   const page = await browser.newPage();
+  // Log in to both sites first, so the browser holds a cookie for each (see the page.fetch checks).
+  await page.goto(otherUrl + "/login");
+  await page.goto(pageUrl + "login");
   await page.goto(pageUrl);
 
   // Drive the extension the same way the side panel does: from an extension page.
@@ -137,6 +179,70 @@ try {
   result = await run(`print(page.store.keys())`, { scriptId: "store-a" });
   assert.equal(result.stdout, "['seen']\n");
   console.log("ok  page.store keeps values between runs, separately per script");
+
+  //    page.fetch: HTTP requests from a script. The other site sends no CORS
+  //    headers; the extension may read it all the same.
+  result = await run(
+    [
+      `r = page.fetch("${otherUrl}/echo", params={"q": "two words"})`,
+      `print(r.status, r.ok, r.headers["Content-Type"], r.json())`,
+      `r = page.fetch("${otherUrl}/echo", json={"name": "é"})`,
+      `print(r.json()["method"], r.json()["type"], r.json()["body"])`,
+      `print(page.fetch("/one").soup.select_one("h1").text)`, // relative to the page
+      `print(page.fetch("${otherUrl}/latin1").text)`,
+      `print(page.fetch("${otherUrl}/bytes").content == bytes(range(256)))`,
+    ].join("\n"),
+  );
+  assert.deepEqual(result, {
+    ok: true,
+    stdout:
+      "200 True application/json {'method': 'GET', 'query': '?q=two+words', 'cookie': None, 'type': None, 'body': ''}\n" +
+      `POST application/json {"name": "\\u00e9"}\n` +
+      "Hello\ncafé\nTrue\n",
+    error: null,
+  });
+  console.log("ok  page.fetch gets text, JSON and bytes, from the page's site and from another one");
+
+  //    Cookies: the browser is logged in to both sites. A script's request is
+  //    made as the logged-in user on the page's own site, and on another site
+  //    only when the script asks for that.
+  result = await run(
+    [
+      `print(page.fetch("/echo").json()["cookie"])`,
+      `print(page.fetch("${otherUrl}/echo").json()["cookie"])`,
+      `print(page.fetch("${otherUrl}/echo", cookies=True).json()["cookie"])`,
+      `print(page.fetch("/echo", cookies=False).json()["cookie"])`,
+    ].join("\n"),
+  );
+  assert.deepEqual(result, { ok: true, stdout: "session=secret\nNone\nsession=secret\nNone\n", error: null });
+  console.log("ok  page.fetch sends cookies to the page's own site only, unless told otherwise");
+
+  //    When there is no answer the script gets an ordinary exception: it can
+  //    catch it, and if it does not, the traceback names it.
+  const closed = http.createServer().listen(0);
+  const deadUrl = `http://127.0.0.1:${closed.address().port}/`;
+  await new Promise((resolve) => closed.close(resolve)); // nothing listens there any more
+  result = await run(
+    [
+      `try:`,
+      `    page.fetch("${deadUrl}")`,
+      `except OSError as error:`,
+      `    print("caught", type(error).__name__)`,
+      `r = page.fetch("${otherUrl}/missing")`,
+      `print(r.status, r.ok, r.text)`,
+      `try:`,
+      `    r.raise_for_status()`,
+      `except OSError as error:`,
+      `    print("caught", error)`,
+      `page.fetch("${otherUrl}/slow", timeout=1)`,
+    ].join("\n"),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "caught ConnectionError\n404 False nothing here\ncaught HTTP Error 404: Not Found\n");
+  assert.match(result.error, /line 11, in <module>\n[^]*\nTimeoutError: Could not fetch .*\/slow: no answer within 1 seconds/);
+  result = await run(`page.fetch("${deadUrl}")`);
+  assert.match(result.error, /ConnectionError: Could not fetch http:\/\/127\.0\.0\.1:\d+\/: the server cannot be reached/);
+  console.log("ok  page.fetch failures are Python exceptions: no answer, too slow, error status");
 
   // 3. Errors come back as Python tracebacks
   result = await run(`await page.click("#missing")`);
@@ -435,5 +541,6 @@ try {
 } finally {
   await browser.close();
   server.close();
+  otherServer.close();
   rmSync(profilePath, { recursive: true, force: true });
 }
