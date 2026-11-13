@@ -16,7 +16,7 @@ const anchors = (text) =>
     match[1].toLowerCase().replace(/[^\w\- ]/g, "").replaceAll(" ", "-"),
   );
 
-for (const name of ["README.md", "CONTRIBUTING.md", "CLA.md"]) {
+for (const name of ["README.md", "CONTRIBUTING.md", "CLA.md", "SECURITY.md"]) {
   test(`${name}: links to files and headings in this repository lead somewhere`, () => {
     for (const target of linkTargets(read(name))) {
       if (/^[a-z]+:/.test(target)) continue; // a web address: not ours to check

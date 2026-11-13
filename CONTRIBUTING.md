@@ -4,6 +4,8 @@ Thanks for wanting to help. This file covers how to set the project up, how to r
 
 Before a pull request from someone outside the project can be merged, its author has to agree to the [contributor license agreement](CLA.md). The [last section](#the-contributor-license-agreement) says why.
 
+Security problems are reported privately, not in an issue: see [SECURITY.md](SECURITY.md).
+
 ## Setup
 
 You need Chrome, [Node.js](https://nodejs.org) 22+ and Python 3 (the tests are run with Python 3.12). The README's [Quick start](README.md#quick-start) has the details.

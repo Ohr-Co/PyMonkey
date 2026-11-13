@@ -115,6 +115,8 @@ npm run test:e2e    # loads the extension in Chrome for Testing and runs real sc
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, tests and how to propose a change. Contributors are asked to agree to the [contributor license agreement](CLA.md), which lets the project be offered under other license terms later while you keep the copyright in your work.
 
+To report a security problem, see [SECURITY.md](SECURITY.md); please do not open a public issue for it.
+
 ## License
 
 [AGPL-3.0](LICENSE)

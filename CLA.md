@@ -1,7 +1,7 @@
 # PyMonkey Contributor License Agreement
 
 > **Draft, version 0.1. Not in force yet.**
-> This text was drafted for [issue #16](https://github.com/Ohr-Co/PyMonkey/issues/16) and has not been reviewed by a lawyer. The project owner still has to fill in the places marked `[TO DECIDE]`, have it reviewed if the project becomes commercial, and choose how contributors sign it. Until this notice is removed, nobody is asked to agree to it.
+> This text was drafted for [issue #16](https://github.com/Ohr-Co/PyMonkey/issues/16) and has not been reviewed by a lawyer. The project owner still has to fill in the two places marked `[TO DECIDE]` (the owner's legal details and the governing law), install the signing bot described at the end, and have the text reviewed if the project becomes commercial. Until this notice is removed, nobody is asked to agree to it.
 
 Thank you for contributing to PyMonkey. This agreement says what rights you give when you contribute. In short:
 
@@ -37,8 +37,6 @@ If anyone starts patent litigation (including a cross-claim or counterclaim) all
 
 ## 4. What the Owner promises in return
 
-`[TO DECIDE: keep or remove this section. It is common in agreements of this kind and makes them easier to accept, but it is a commitment by the Owner.]`
-
 Whatever other terms the Owner offers, the Owner will also keep making every Contribution it includes in the Project available under the GNU Affero General Public License version 3 or another license approved by the Open Source Initiative.
 
 ## 5. What you confirm
@@ -65,4 +63,4 @@ The Owner may transfer its rights under this agreement to whoever takes over the
 
 ## How to agree
 
-`[TO DECIDE: how agreement is recorded. Issue #16 asks for a bot such as CLA Assistant that asks each new contributor on their first pull request and blocks the merge until they agree; that is not set up yet.]`
+Agreement is recorded by [CLA Assistant](https://cla-assistant.io). On your first pull request to the Project, the bot posts a comment with a link to this agreement; you agree by signing in with your GitHub account and confirming. The bot records which version you agreed to and when, and the pull request cannot be merged until you have agreed. You agree once; later pull requests are covered.
