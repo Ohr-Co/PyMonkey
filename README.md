@@ -273,6 +273,7 @@ For the same reason the panel never holds one request open for the length of a r
 ```
 extension/
   manifest.json
+  icons/                     the PyMonkey mark at 16, 32, 48 and 128 px (toolbar, extensions page)
   background.js              message router, offscreen lifecycle, auto-run matching, storage, the toolbar icon
   content.js                 page snapshot, DOM primitives, saving downloads
   offscreen/                 hidden page that owns the Python worker
