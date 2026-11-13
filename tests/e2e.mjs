@@ -6,7 +6,7 @@
 // --load-extension). Point CHROME_PATH at the binary if it is not found.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -75,6 +75,8 @@ const launch = () =>
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`, "--no-sandbox"],
   });
 let browser = await launch();
+// Where this browser puts downloaded files (see the page.download check).
+const downloadPath = mkdtempSync(join(tmpdir(), "pymonkey-e2e-downloads-"));
 
 try {
   const isServiceWorker = (t) => t.type() === "service_worker";
@@ -243,6 +245,40 @@ try {
   result = await run(`page.fetch("${deadUrl}")`);
   assert.match(result.error, /ConnectionError: Could not fetch http:\/\/127\.0\.0\.1:\d+\/: the server cannot be reached/);
   console.log("ok  page.fetch failures are Python exceptions: no answer, too slow, error status");
+
+  //    page.download: a script saves what it collected as files. Three in a
+  //    row, the first with 10,000 rows.
+  const cdp = await browser.target().createCDPSession();
+  await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath });
+  result = await run(
+    [
+      `rows = [{"n": n, "title": f"Item {n}, café", "url": f"https://example.com/items/{n}"} for n in range(10_000)]`,
+      `page.download("items.csv", rows)`,
+      `page.download("items.json", rows[:2])`,
+      `page.download("notes.txt", "just text")`,
+      `print("saved")`,
+    ].join("\n"),
+  );
+  assert.deepEqual(result, { ok: true, stdout: "saved\n", error: null });
+  // A download takes a moment to arrive on disk.
+  const downloadedFile = async (name) => {
+    const path = join(downloadPath, name);
+    for (let waited = 0; !existsSync(path); waited += 100) {
+      assert.ok(waited < 10_000, `${name} was not downloaded`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return readFileSync(path, "utf8");
+  };
+  const csvLines = (await downloadedFile("items.csv")).split("\r\n");
+  assert.equal(csvLines.length, 10_002); // header + 10,000 rows + the empty string after the last line break
+  assert.equal(csvLines[0], "﻿n,title,url"); // starts with the marker Excel needs to read UTF-8
+  assert.equal(csvLines[10_000], `9999,"Item 9999, café",https://example.com/items/9999`);
+  assert.deepEqual(JSON.parse(await downloadedFile("items.json")), [
+    { n: 0, title: "Item 0, café", url: "https://example.com/items/0" },
+    { n: 1, title: "Item 1, café", url: "https://example.com/items/1" },
+  ]);
+  assert.equal(await downloadedFile("notes.txt"), "just text");
+  console.log("ok  page.download saves CSV (10,000 rows), JSON and text files");
 
   // 3. Errors come back as Python tracebacks
   result = await run(`await page.click("#missing")`);
@@ -542,5 +578,6 @@ try {
   await browser.close();
   server.close();
   otherServer.close();
+  rmSync(downloadPath, { recursive: true, force: true });
   rmSync(profilePath, { recursive: true, force: true });
 }

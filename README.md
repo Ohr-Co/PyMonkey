@@ -37,7 +37,7 @@ After changing extension code, press the reload icon on the PyMonkey card in `ch
 
 ## Writing scripts
 
-Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it. `page.store` remembers values from one run to the next, and `page.fetch` gets other addresses.
+Every script gets a `page` object. Reading is instant and works on a local copy of the page; writing talks to the real page and returns when the page has done it. `page.store` remembers values from one run to the next, `page.fetch` gets other addresses, and `page.download` saves what you collected as a file.
 
 | Read (works on a snapshot of the page) | |
 |---|---|
@@ -99,7 +99,20 @@ rates = page.fetch("https://api.example.com/rates", params={"base": "EUR"}).json
 - Cookies are what make a request count as you. `page.fetch` sends the browser's cookies only to the site the script is running on, so following links there works while you are logged in. Requests to any other site are made without cookies, as a stranger would make them, unless the script says `cookies=True`.
 - That default prevents accidents; it does not fence a script in. A script is ordinary Python running inside the extension, and can reach the browser's own `fetch` through Pyodide's `js` module, cookies included. Treat a script like any program you install: read it before you run it, above all one that somebody else wrote.
 
-Write, store and fetch calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
+| Save (a file in your Downloads folder) | |
+|---|---|
+| `page.download("rows.csv", rows)` | A list of dicts becomes a CSV file: one row each, the keys as header line |
+| `page.download("data.json", value)` | Anything JSON can hold becomes a JSON file |
+| `page.download("notes.txt", text)` | A string or bytes is saved as it is, under any name |
+
+```python
+rows = [{"text": a.get_text(strip=True), "href": a["href"]} for a in page.select("a[href]")]
+page.download("links.csv", rows)
+```
+
+The file arrives like any other download. For CSV, the columns are the keys of the dicts in the order they first appear, and a row without a key gets an empty cell; a list of lists is written without a header line. The file is UTF-8 with a byte-order mark so that Excel shows accented letters correctly (in Python, read it back with `encoding="utf-8-sig"`). Cells are written as scraped: text starting with `=` is a formula to a spreadsheet, so be as careful with a file scraped from a site you do not trust as with any other spreadsheet from a stranger. A file can be up to 30 MB, far beyond 10,000 rows. When a script saves several files in a row, Chrome may ask once whether the site may download multiple files.
+
+Write, store, fetch and download calls need no `await`. Scripts written for earlier versions, which say `await page.click(...)`, keep working. Top-level `await` is still there for things that really are asynchronous, such as `await asyncio.sleep(1)`.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once.
 
@@ -144,7 +157,7 @@ For the same reason the panel never holds one request open for the length of a r
 extension/
   manifest.json
   background.js              message router, offscreen lifecycle, auto-run matching, storage
-  content.js                 page snapshot + DOM primitives
+  content.js                 page snapshot, DOM primitives, saving downloads
   offscreen/                 hidden page that owns the Python worker
   worker/pyodide-worker.js   loads Pyodide, runs scripts
   python/pymonkey_runtime.py the `page` API and script runner (plain Python)
