@@ -106,6 +106,7 @@ test("the browser's vague failure message is explained, a specific one is kept",
   const failing = (message) => () => Promise.reject(new TypeError(message));
   let reply = await httpFetch(request(), failing("Failed to fetch"));
   assert.match(reply.error, /server cannot be reached/);
+  assert.match(reply.error, /or PyMonkey has not been allowed on that site$/); // the one cause the user can do something about
   reply = await httpFetch(request(), failing("Invalid name"));
   assert.equal(reply.error, "Invalid name");
 });

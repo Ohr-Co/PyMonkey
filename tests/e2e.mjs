@@ -12,8 +12,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import puppeteer from "puppeteer-core";
+import { copyExtension } from "./extension-copy.mjs";
 
-const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "..", "extension");
+// The browser loads a copy of the extension that has been allowed on the test
+// sites, as if the user had said yes to each (extension-copy.mjs says why).
+const realExtensionPath = join(dirname(fileURLToPath(import.meta.url)), "..", "extension");
+const extension = copyExtension(realExtensionPath);
+const extensionPath = extension.path;
 const chromePath =
   process.env.CHROME_PATH ??
   ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"].find(existsSync);
@@ -23,10 +28,16 @@ const HTML = `<!doctype html><title>Test page</title>
 <input id="q"><button id="btn" onclick="document.title='clicked'">Go</button>`;
 
 // Besides the test page, the servers have a few addresses for page.fetch to call.
-// Note what is missing: CORS headers. A web page could not read these from another site.
+// Note what is missing: CORS headers. A web page could not read these from
+// another site, and neither can PyMonkey from a site it has not been allowed on.
 function serve(req, res) {
   const path = new URL(req.url, "http://localhost").pathname;
   if (path === "/slow") return; // never answers
+  if (path === "/cors") {
+    // The exception: this address says that any site may read it.
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.end("for everyone");
+  }
   if (path === "/login") {
     res.setHeader("Set-Cookie", "session=secret; Path=/");
     res.end("logged in");
@@ -63,6 +74,10 @@ const pageUrl = `http://localhost:${server.address().port}/`;
 // "Another site": same machine, but a different host name, so a different origin with its own cookies.
 const otherServer = http.createServer(serve).listen(0);
 const otherUrl = `http://127.0.0.1:${otherServer.address().port}`;
+// A third site, which PyMonkey has NOT been allowed on: the first server under
+// another name (to Chrome, every name that ends in .localhost is this machine).
+const blockedUrl = `http://not-allowed.localhost:${server.address().port}/`;
+const blockedSite = blockedUrl + "*"; // the site as Chrome names it when asked for access
 
 // The browser's profile folder is ours, so the browser can be closed and
 // started again with everything the extension stored still in place.
@@ -884,12 +899,23 @@ print("not interrupted")`);
   //     Looks. At 320 px, the narrowest the panel is made for, nothing sticks
   //     out and the panel does not scroll sideways. (With the longest note on
   //     whether the script is saved, which shares a line with three buttons.)
+  //     And with the three notices about site access showing (see 8e), each
+  //     with an address in it, which is one long word.
+  const showNotices = () =>
+    panel.evaluate(() => {
+      for (const notice of document.querySelectorAll(".notice")) {
+        notice.hidden = false;
+        notice.querySelector("span").textContent =
+          "No access to https://a-rather-long-name.of-a-site.example.com/* yet, so this script will not run there by itself.";
+      }
+    });
   await panel.setViewport({ width: 320, height: 640 });
   assert.equal(await saveState(), "Unsaved changes");
+  await showNotices();
   const misfits = await panel.evaluate(() => {
     const found = [];
     if (document.documentElement.scrollWidth > innerWidth) found.push("the panel scrolls sideways");
-    for (const el of document.querySelectorAll("h1, #status, #save-state, button, input, select, label, #code, pre")) {
+    for (const el of document.querySelectorAll("h1, #status, #save-state, button, input, select, label, #code, pre, .notice")) {
       const box = el.getBoundingClientRect();
       if (box.width === 0) continue; // not shown
       if (box.left < 0 || box.right > innerWidth) found.push(`${el.id || el.textContent.trim()} sticks out`);
@@ -923,12 +949,14 @@ print("not interrupted")`);
     { what: "shortcut on Run", selector: "#run kbd" },
     { what: "shortcut on Save", selector: "#save kbd" },
     { what: "saved or not", selector: "#save-state" },
+    ...["match-access", "tab-access", "fetch-access"].map((id) => ({ what: `notice ${id}`, selector: `#${id} span` })),
+    { what: "button Allow", selector: "#match-access button" },
   ];
-  const outlined = ["#script-list", "#new", "#name", "#match", "#timeout", "#code", "#save"];
+  const outlined = ["#script-list", "#new", "#name", "#match", "#timeout", "#code", "#save", "#match-access button"];
   //     The checks in 8 saw real runs put the panel in each of its states.
   //     Here each state is put on by hand, to look at its colors.
-  const dressAs = (state) =>
-    panel.evaluate((state) => {
+  const dressAs = async (state) => {
+    await panel.evaluate((state) => {
       document.getElementById("status").dataset.state = state;
       const output = document.getElementById("output");
       output.textContent = "some output";
@@ -936,6 +964,8 @@ print("not interrupted")`);
       output.classList.toggle("error", state === "error" || state === "stopped");
       document.getElementById("last-run").classList.toggle("error", state === "error");
     }, state);
+    await showNotices(); // a notice is not an error: it must stay gray in every state
+  };
   const isGray = (color) => new Set(color.match(/[\d.]+/g).slice(0, 3)).size === 1;
   //     Which element shows the focus: the one that has it, or for the editor its frame.
   const focusRing = () =>
@@ -992,6 +1022,154 @@ print("not interrupted")`);
   console.log("ok  every button and field has a name for screen readers");
   await panel.setViewport({ width: 800, height: 600 });
   await panel.reload(); // back to its real state, and drop the chrome.tabs.query stand-in
+  await panelReady();
+  await panel.click("#new");
+
+  // 8e. Site access. PyMonkey is installed with access to no site, and the
+  //     user allows sites one at a time. The copy under test has been allowed
+  //     on the two test sites and nowhere else.
+  assert.deepEqual((await panel.evaluate(() => chrome.permissions.getAll())).origins.sort(), [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+  ]);
+  //     What a notice says, or null while it is not shown.
+  const notice = (id) => panel.$eval(`#${id}`, (el) => (el.hidden ? null : el.querySelector("span").textContent));
+  const noticeIs = (id, shown) =>
+    panel.waitForFunction((id, shown) => document.getElementById(id).hidden !== shown, { timeout: 5_000 }, id, shown);
+  const listed = () => panel.$$eval("#script-list option", (options) => options.map((o) => o.textContent));
+  const saved = () => panel.waitForFunction(() => document.getElementById("save-state").textContent === "Saved", { timeout: 5_000 });
+  const tabIds = () => panel.evaluate(async () => (await chrome.tabs.query({})).map((tab) => tab.id));
+  //     Make `tabId` the panel's "active tab".
+  const pointPanelAt = (tabId) =>
+    panel.evaluate((tabId) => {
+      const get = chrome.tabs.get.bind(chrome.tabs);
+      chrome.tabs.query = async () => [await get(tabId)];
+    }, tabId);
+  const pageTabId = await panel.evaluate(async (pageUrl) => (await chrome.tabs.query({ url: pageUrl }))[0].id, pageUrl);
+
+  //     A page on a site that is not allowed. Chrome does not even tell the
+  //     extension its address. Run says why it cannot run there and what to
+  //     do, and the panel keeps saying it under the Run button.
+  const tabsBefore = await tabIds();
+  const blocked = await browser.newPage();
+  await blocked.goto(blockedUrl);
+  const [blockedTabId] = (await tabIds()).filter((id) => !tabsBefore.includes(id));
+  assert.equal(await panel.evaluate(async (id) => (await chrome.tabs.get(id)).url ?? null, blockedTabId), null);
+  await panel.bringToFront();
+  await pointPanelAt(blockedTabId);
+  await pressRun(`print(page.title)`);
+  assert.deepEqual(await panelOutput(), {
+    text:
+      "PyMonkey could not run on this page: no access to this site. " +
+      "Click the PyMonkey icon in the toolbar to allow it on this tab, then run the script again.",
+    isError: true,
+  });
+  await noticeIs("tab-access", true);
+  assert.match(await notice("tab-access"), /has not been allowed on the page in this tab\. Click the PyMonkey icon/);
+  //     On a page that is allowed there is nothing to say.
+  await pointPanelAt(pageTabId);
+  await pressRun(`print(page.title)`);
+  assert.deepEqual(await panelOutput(), { text: "clicked\n", isError: false });
+  await noticeIs("tab-access", false);
+  console.log("ok  site access: a page that is not allowed is left alone, and the panel says what to do");
+
+  //     Saving a script that is to run automatically asks for its site. For a
+  //     site that is allowed already Chrome has nothing to ask the user, so
+  //     this goes through the real request.
+  const marker = `page.set_attr("body", "data-site-access", "ran")`;
+  await panel.click("#new");
+  await panel.type("#name", "Allowed");
+  await panel.type("#match", pageUrl + "*");
+  await setEditorText(marker);
+  await panel.click("#save");
+  await saved();
+  assert.equal(await notice("match-access"), null);
+  assert.ok((await listed()).includes("Allowed"), String(await listed()));
+
+  //     For a site that is not allowed, Chrome asks the user in a window of
+  //     its own, which this browser cannot show. A stand-in takes the place
+  //     of Chrome's function: it notes what was asked for, and says no.
+  await panel.evaluate(() => {
+    window.__asked = [];
+    chrome.permissions.request = async ({ origins }) => {
+      window.__asked.push(origins);
+      return false;
+    };
+  });
+  const asked = () => panel.evaluate(() => window.__asked);
+  await panel.click("#new");
+  await panel.type("#name", "Blocked");
+  //     The notice is there as soon as the pattern is: before saving, and without asking.
+  await panel.type("#match", blockedUrl + "*");
+  await noticeIs("match-access", true);
+  assert.equal(await notice("match-access"), `No access to ${blockedSite} yet, so this script will not run there by itself.`);
+  assert.deepEqual(await asked(), []);
+  //     Switched off, the script runs nowhere by itself and needs no site.
+  await panel.click("#enabled");
+  await noticeIs("match-access", false);
+  await panel.click("#enabled");
+  await noticeIs("match-access", true);
+  await setEditorText(marker);
+  await panel.click("#save");
+  await saved();
+  assert.deepEqual(await asked(), [[blockedSite]]); // asked for that one site, and for the whole of it
+  //     The answer was no. The script is saved all the same, and marked.
+  assert.ok((await listed()).includes("Blocked (no access)"), String(await listed()));
+  assert.equal(await notice("match-access"), `No access to ${blockedSite} yet, so this script will not run there by itself.`);
+  //     The button in the notice asks again.
+  await panel.click("#match-access button");
+  assert.deepEqual(await asked(), [[blockedSite], [blockedSite]]);
+  console.log("ok  site access: saving a script asks for its site, once; a script without access is marked");
+
+  //     Automatic runs: the allowed page gets its script, the other page is left alone.
+  await blocked.reload();
+  await page.reload();
+  await page.waitForSelector("body[data-site-access=ran]", { timeout: 15_000 });
+  const autoRan = () =>
+    panel.evaluate(async () => {
+      const all = await chrome.storage.local.get(null);
+      return all.scripts.filter((script) => all[`lastRun:${script.id}`]).map((script) => script.name);
+    });
+  await panel.waitForFunction(
+    async () => Object.keys(await chrome.storage.local.get(null)).some((key) => key.startsWith("lastRun:")),
+    { timeout: 10_000 },
+  );
+  assert.deepEqual(await autoRan(), ["Allowed"]);
+  assert.equal(await blocked.$eval("body", (el) => el.dataset.siteAccess ?? null), null);
+  console.log("ok  site access: scripts run automatically on allowed sites only");
+
+  //     page.fetch: on a site that is not allowed PyMonkey can read what any
+  //     web page could (an address that lets every site read it) and no more.
+  //     When a script fails on that, the panel offers to ask for the site.
+  await pressRun(`print(page.fetch("${blockedUrl}cors").text)\npage.fetch("${blockedUrl}echo")`);
+  shown = await panelOutput();
+  assert.match(shown.text, /^for everyone\n/);
+  assert.match(
+    shown.text,
+    /ConnectionError: Could not fetch http:\/\/not-allowed\.localhost:\d+\/echo: .* or PyMonkey has not been allowed on that site\n$/,
+  );
+  await noticeIs("fetch-access", true);
+  assert.equal(
+    await notice("fetch-access"),
+    `The script asked for an address on ${blockedSite}, where PyMonkey has not been allowed. Allow it, then run again.`,
+  );
+  await panel.click("#fetch-access button");
+  assert.deepEqual((await asked()).at(-1), [blockedSite]);
+  assert.equal((await asked()).length, 3);
+  //     An address that fails for another reason gets no such offer: the site is allowed.
+  await pressRun(`page.fetch("${deadUrl}")`);
+  assert.match((await panelOutput()).text, /ConnectionError: Could not fetch/);
+  await noticeIs("fetch-access", false);
+  console.log("ok  site access: page.fetch reads other sites as a web page would, and the panel offers to ask for more");
+
+  //     Put things back: no scripts of this check, the real "active tab".
+  await panel.evaluate(async () => {
+    const { deleteScript } = await import("/lib/storage.js");
+    const { scripts } = await chrome.storage.local.get("scripts");
+    for (const script of scripts.filter((s) => ["Allowed", "Blocked"].includes(s.name))) await deleteScript(script.id);
+  });
+  await blocked.close();
+  await panel.reload();
   await panelReady();
   await panel.click("#new");
 
@@ -1119,11 +1297,119 @@ print("not interrupted")`);
   assert.equal(result.stdout, "gone\n");
   console.log("ok  page.store survives a browser restart, and goes when its script is deleted");
 
-  console.log("\nAll end-to-end checks passed.");
+  // 12. The toolbar icon. This check uses the extension as it is installed,
+  //     allowed on no site, and the real side panel. A click on PyMonkey's
+  //     icon opens the panel and allows PyMonkey on the page in that tab.
+  //     It needs a browser that lets a test click the icon: Chrome 157 does,
+  //     Chrome for Testing 145 does not. TOOLBAR_CHROME_PATH names the browser
+  //     to use, if it is not the one the rest of the test runs in.
+  const toolbarProfile = mkdtempSync(join(tmpdir(), "pymonkey-e2e-toolbar-"));
+  let toolbarBrowser = null;
+  let skipped = 0;
+  try {
+    toolbarBrowser = await puppeteer.launch({
+      executablePath: process.env.TOOLBAR_CHROME_PATH ?? chromePath,
+      headless: true,
+      userDataDir: toolbarProfile,
+      // These two let a test load an extension, and click its icon, by
+      // commands to the browser. (Regular Chrome no longer takes --load-extension.)
+      pipe: true,
+      enableExtensions: true,
+      args: ["--no-sandbox"],
+    });
+    let tab = null;
+    let toolbarId = null;
+    // (Two of puppeteer's internals: it has no public way to send this command yet.)
+    const clickIcon = () => toolbarBrowser._connection.send("Extensions.triggerAction", { id: toolbarId, targetId: tab._tabId });
+    let canClick = true;
+    try {
+      toolbarId = await toolbarBrowser.installExtension(realExtensionPath);
+      // A click that comes before the background worker has started and is
+      // listening for it is lost, so wait until it is.
+      const isBackground = (t) => isServiceWorker(t) && t.url().startsWith(`chrome-extension://${toolbarId}/`);
+      const background = await (await toolbarBrowser.waitForTarget(isBackground, { timeout: 10_000 })).worker();
+      const deadline = Date.now() + 10_000;
+      while (!(await background.evaluate(() => chrome.action.onClicked.hasListeners()))) {
+        assert.ok(Date.now() < deadline, "the background worker never started listening for clicks on the icon");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      tab = await toolbarBrowser.newPage();
+      await tab.goto(pageUrl + "login"); // logged in, as in the checks of page.fetch
+      await tab.goto(pageUrl);
+      await clickIcon();
+    } catch (err) {
+      // A browser that does not know one of the two commands says so in these words.
+      if (!/Method not available|wasn't found/.test(err.message)) throw err;
+      canClick = false;
+    }
+    if (!canClick) {
+      skipped += 1;
+      console.log("SKIPPED  toolbar icon: this browser cannot click it from a test (see TOOLBAR_CHROME_PATH in the README)");
+    } else {
+      //   The click opened the side panel...
+      const isPanel = (t) => t.url() === `chrome-extension://${toolbarId}/panel/panel.html`;
+      panel = await (await toolbarBrowser.waitForTarget(isPanel, { timeout: 10_000 })).asPage();
+      await panel.waitForFunction(() => document.getElementById("status").dataset.state !== "loading", { timeout: 60_000 });
+      //   ...and allowed PyMonkey on the page in the tab: Run works, with one click.
+      //   Nothing was allowed for good.
+      assert.equal(await notice("tab-access"), null);
+      await pressRun(`print(page.title, page.fetch("/echo").json()["cookie"])`);
+      assert.deepEqual(await panelOutput(), { text: "Test page session=secret\n", isError: false });
+      assert.deepEqual((await panel.evaluate(() => chrome.permissions.getAll())).origins, []);
+      //   The other site is still out of reach.
+      await pressRun(`page.fetch("${otherUrl}/echo")`);
+      assert.match((await panelOutput()).text, /or PyMonkey has not been allowed on that site\n$/);
+      await noticeIs("fetch-access", true);
+
+      //   A tab allowed by the icon is for running by hand. A script that is to
+      //   run automatically on this site still needs the site allowed for good:
+      //   it is marked in the list, and does not start. (Chrome's question to
+      //   the user gets a stand-in again, which says no.)
+      await panel.evaluate(() => (chrome.permissions.request = async () => false));
+      await panel.type("#name", "Auto");
+      await panel.type("#match", pageUrl + "*");
+      await setEditorText(`page.set_attr("body", "data-site-access", "ran")`);
+      await panel.click("#save");
+      await saved();
+      assert.deepEqual(await listed(), ["(unsaved script)", "Auto (no access)"]);
+      await tab.reload(); // the same site: the tab stays allowed
+      await panel.click("#new");
+      await pressRun(`print("by hand")`);
+      assert.deepEqual(await panelOutput(), { text: "by hand\n", isError: false });
+      await pressRun(`print(page.select_one("body").get("data-site-access"))`); // runs after anything the first run set off
+      assert.deepEqual(await panelOutput(), { text: "None\n", isError: false });
+      assert.deepEqual(
+        await panel.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((key) => key.startsWith("lastRun:"))),
+        [],
+      );
+
+      //   Going to another site ends it. The panel says so without being asked...
+      await tab.goto(otherUrl + "/");
+      await noticeIs("tab-access", true);
+      await pressRun(`print(page.title)`);
+      assert.match((await panelOutput()).text, /^PyMonkey could not run on this page: no access to this site\. Click the PyMonkey icon/);
+      //   ...and one more click on the icon allows this page. The panel stays as it is.
+      await clickIcon();
+      await noticeIs("tab-access", false);
+      assert.equal(toolbarBrowser.targets().filter(isPanel).length, 1);
+      await pressRun(`print(page.title)`);
+      assert.deepEqual(await panelOutput(), { text: "Test page\n", isError: false });
+      //   Coming back to the first site does not bring its permission back.
+      await tab.goto(pageUrl);
+      await noticeIs("tab-access", true);
+      console.log("ok  toolbar icon: opens the side panel and allows the page in the tab, until the tab goes to another site");
+    }
+  } finally {
+    await toolbarBrowser?.close();
+    rmSync(toolbarProfile, { recursive: true, force: true });
+  }
+
+  console.log(skipped ? `\nAll end-to-end checks passed, except ${skipped} that could not run in this browser.` : "\nAll end-to-end checks passed.");
 } finally {
   await browser.close();
   server.close();
   otherServer.close();
   rmSync(downloadPath, { recursive: true, force: true });
   rmSync(profilePath, { recursive: true, force: true });
+  extension.remove();
 }

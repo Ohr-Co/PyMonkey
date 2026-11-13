@@ -83,7 +83,7 @@ npm run measure -- --rounds 3      # the middle value of three rounds
 npm run measure -- --extension ../other-copy/extension    # another copy of PyMonkey, to compare with
 ```
 
-`scripts/measure-memory.mjs` starts Chrome for Testing with the extension, the same way the end-to-end test does, and uses it like a person would: it saves a script that runs automatically, then opens pages. The script selects every table row on the page, reads a number out of each, and then waits six seconds so there is time to measure while it still holds the rows. At each stage the measuring script finds the extension's process and asks the operating system how large it is.
+`scripts/measure-memory.mjs` starts Chrome for Testing with the extension, the same way the end-to-end test does (with a copy that has been allowed on the pages it measures with, see the README under Tests), and uses it like a person would: it saves a script that runs automatically, then opens pages. The script selects every table row on the page, reads a number out of each, and then waits six seconds so there is time to measure while it still holds the rows. At each stage the measuring script finds the extension's process and asks the operating system how large it is.
 
 Chrome runs everything an extension does (the background worker, the offscreen document with Python in it, the side panel) in one process of its own, so that one figure is the whole of PyMonkey. The content script is not in it: it lives in each page's process and holds no Python.
 
