@@ -6,12 +6,15 @@
 
 const escapeRegex = (s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
 
+// The three parts of a pattern: scheme, host, path.
+const PARTS = /^(\*|https?|file):\/\/([^/]*)(\/.*)$/;
+
 /** Turn one match pattern into a RegExp, or return null if it is invalid. */
 export function patternToRegExp(pattern) {
   pattern = pattern.trim();
   if (pattern === "<all_urls>") return /^(https?|file):\/\/.*/;
 
-  const parts = /^(\*|https?|file):\/\/([^/]*)(\/.*)$/.exec(pattern);
+  const parts = PARTS.exec(pattern);
   if (!parts) return null;
   const [, scheme, host, path] = parts;
 
@@ -26,6 +29,20 @@ export function patternToRegExp(pattern) {
   const pathRe = path.split("*").map(escapeRegex).join(".*");
 
   return new RegExp(`^${schemeRe}://${hostRe}${pathRe}$`);
+}
+
+/**
+ * The site a pattern is about, as a pattern of its own: the same scheme and
+ * host with any path, e.g. "https://example.com/*" for "https://example.com/shop/*".
+ * Chrome gives an extension access by site, not by page, so this is what
+ * PyMonkey asks for (see lib/site-access.js). Null if the pattern is invalid.
+ */
+export function patternSite(pattern) {
+  pattern = pattern.trim();
+  if (pattern === "<all_urls>") return pattern;
+  if (!patternToRegExp(pattern)) return null;
+  const [, scheme, host] = PARTS.exec(pattern);
+  return `${scheme}://${host}/*`;
 }
 
 /** True if `url` matches the pattern (or any pattern, one per line). */
