@@ -1,5 +1,7 @@
 # PyMonkey
 
+[![CI](https://github.com/Ohr-Co/PyMonkey/actions/workflows/ci.yml/badge.svg)](https://github.com/Ohr-Co/PyMonkey/actions/workflows/ci.yml)
+
 A browser extension that runs your Python scripts on the pages you visit: scrape data, change page views, automate clicks and input.
 
 Python runs inside the browser through [Pyodide](https://pyodide.org) (CPython compiled to WebAssembly). Nothing to install besides the extension, and nothing leaves your machine.
