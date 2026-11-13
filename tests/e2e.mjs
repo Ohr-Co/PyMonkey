@@ -6,7 +6,7 @@
 // --load-extension). Point CHROME_PATH at the binary if it is not found.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -659,6 +659,73 @@ try {
   await closeAndReopenPanel();
   assert.match(await editorText(), /^# `page` is the page you are looking at/); // nothing left over from the deleted script
   console.log("ok  editor: unsaved text survives closing and reopening the panel");
+
+  // 8c. Scripts as .py files. Export saves the script in the fields, with a
+  //     header comment that holds its name, match pattern and time limit.
+  const storedScripts = () =>
+    panel.evaluate(async () => (await chrome.storage.local.get("scripts")).scripts.map(({ id, ...rest }) => rest));
+  const outputText = () => panel.$eval("#output", (el) => el.textContent);
+  await panel.type("#name", "Shop: prices");
+  await panel.type("#match", "https://example.com/shop/*");
+  await panel.$eval("#timeout", (el) => el.select()); // select what is there, so that typing replaces it
+  await panel.type("#timeout", "45");
+  await setEditorText(`print("exported")\n`);
+  await panel.click("#export");
+  const exported = await downloadedFile("Shop- prices.py"); // a file name cannot hold a colon
+  assert.equal(
+    exported,
+    [
+      "# ==PyMonkey==",
+      "# @name     Shop: prices",
+      "# @match    https://example.com/shop/*",
+      "# @timeout  45",
+      "# ==/PyMonkey==",
+      "",
+      `print("exported")`,
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(await storedScripts(), []); // exporting does not save
+  console.log("ok  export downloads a .py file with a header holding name and match pattern");
+
+  //     Import three files at once: the exported one, a plain .py file without
+  //     a header, and one that is not text. The first two become scripts.
+  const plainPath = join(downloadPath, "plain script.py");
+  const binaryPath = join(downloadPath, "picture.py");
+  writeFileSync(plainPath, `print("plain")\r\n`);
+  writeFileSync(binaryPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13]));
+  const chooseFiles = async (...paths) => (await panel.$("#import-file")).uploadFile(...paths);
+  await chooseFiles(join(downloadPath, "Shop- prices.py"), plainPath, binaryPath);
+  await panel.waitForFunction(() => document.getElementById("output").textContent.includes("picture.py"), { timeout: 5_000 });
+  assert.deepEqual(await storedScripts(), [
+    //   Read from the header. Switched off: it must not start running on its own before it was read.
+    { name: "Shop: prices", match: "https://example.com/shop/*", enabled: false, timeout: 45, code: `print("exported")\n` },
+    //   No header: named after the file, runs by hand only.
+    { name: "plain script", match: "", enabled: true, timeout: 30, code: `print("plain")\n` },
+  ]);
+  const notices = (await outputText()).split("\n");
+  assert.match(notices[0], /^Imported "Shop: prices" from Shop- prices\.py\. It is switched off\./);
+  assert.equal(notices[1], `Imported "plain script" from plain script.py. It runs only when you press Run.`);
+  assert.equal(notices[2], "Could not import picture.py: it is not a text file.");
+  //     The fields held a script that was not saved, so they were left alone.
+  assert.match(notices[3], /^The editor still shows what you were working on/);
+  assert.equal(await editorText(), `print("exported")\n`);
+  assert.deepEqual(await panel.$$eval("#script-list option", (options) => options.map((o) => o.textContent)), [
+    "(unsaved script)", "Shop: prices", "plain script",
+  ]);
+  assert.equal((await fields()).selected, "(unsaved script)");
+  //     With nothing to lose, the imported script is shown, ready to be read.
+  await panel.click("#new");
+  await chooseFiles(join(downloadPath, "Shop- prices.py"));
+  await panel.waitForFunction(() => document.getElementById("name").value === "Shop: prices", { timeout: 5_000 });
+  assert.equal(await editorText(), `print("exported")\n`);
+  assert.deepEqual(await fields(), {
+    selected: "Shop: prices", name: "Shop: prices", match: "https://example.com/shop/*", enabled: false, timeout: "45",
+  });
+  assert.equal((await storedScripts()).length, 3); // importing a file again makes another script
+  assert.equal((await outputText()).split("\n").length, 1);
+  await panel.click("#new");
+  console.log("ok  import creates scripts from .py files, with or without a header");
 
   // 9. Auto-run: saved scripts with a matching URL pattern run on page load,
   //    one after the other. The first is cut off by its own 1-second time limit;

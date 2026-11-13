@@ -2,7 +2,8 @@
 // Talks only to the background service worker (target: "background").
 
 import { createEditor } from "./editor.js";
-import { formToRestore, loadDraft, saveDraft, scriptFields } from "../lib/draft.js";
+import { formToRestore, hasChanges, loadDraft, saveDraft, scriptFields } from "../lib/draft.js";
+import { MAX_FILE_BYTES, fileNameFor, formatScriptFile, importedScript, importNotice } from "../lib/script-file.js";
 import { startRun } from "../lib/run-client.js";
 import { describeLastRun, isLastRunKey } from "../lib/last-run.js";
 import { getScripts, getLastRuns, saveScript, deleteScript, markLastRunSeen } from "../lib/storage.js";
@@ -13,6 +14,7 @@ const els = {
   status: $("status"), list: $("script-list"), name: $("name"), match: $("match"),
   enabled: $("enabled"), timeout: $("timeout"), output: $("output"),
   run: $("run"), stop: $("stop"), save: $("save"), del: $("delete"), newBtn: $("new"),
+  importBtn: $("import"), importFile: $("import-file"), exportBtn: $("export"),
   lastRun: $("last-run"), lastRunSummary: $("last-run-summary"),
   lastRunUrl: $("last-run-url"), lastRunOutput: $("last-run-output"),
 };
@@ -51,6 +53,14 @@ function readForm() {
     timeout: els.timeout.value,
     code: editor.getText(),
   };
+}
+
+// Is there anything in the fields that showing another script would lose?
+function hasUnsavedWork() {
+  const form = readForm();
+  if (currentId) return hasChanges(form, savedScripts.find((s) => s.id === currentId));
+  // A new script counts once something was typed into it.
+  return form.code !== STARTER || form.name.trim() !== "" || form.match.trim() !== "";
 }
 
 // Keep a copy of the fields, so that they are still there when the panel is
@@ -150,6 +160,50 @@ els.newBtn.addEventListener("click", () => {
 els.list.addEventListener("change", async () => {
   savedScripts = await getScripts();
   loadIntoEditor(savedScripts.find((s) => s.id === els.list.value) ?? null);
+});
+
+// Export: the script as it is in the fields now, saved as a .py file. The
+// header comment on top of the file is described in lib/script-file.js.
+els.exportBtn.addEventListener("click", () => {
+  const script = scriptFields(readForm());
+  // The way to make a browser save text as a file: wrap it in a Blob (a file
+  // in memory), give that an address, and click a download link to it.
+  const url = URL.createObjectURL(new Blob([formatScriptFile(script)], { type: "text/x-python" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileNameFor(script.name);
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000); // free the memory once the download has started
+});
+
+// Import: every chosen .py file becomes a saved script.
+els.importBtn.addEventListener("click", () => els.importFile.click());
+els.importFile.addEventListener("change", async () => {
+  const notices = [];
+  let failed = false;
+  let last = null; // the last script that was imported
+  for (const file of els.importFile.files) {
+    try {
+      if (file.size > MAX_FILE_BYTES) throw new Error("it is too large to be a script");
+      const script = importedScript(await file.text(), file.name);
+      last = await saveScript(script);
+      notices.push(importNotice(script, file.name));
+    } catch (error) {
+      failed = true;
+      notices.push(`Could not import ${file.name}: ${error.message}.`);
+    }
+  }
+  els.importFile.value = ""; // so that choosing the same file again counts as a change
+  if (last && hasUnsavedWork()) {
+    // Do not put the imported script in place of work that would be lost.
+    await refreshList();
+    notices.push("The editor still shows what you were working on, which is not saved. Pick an imported script from the list to see it.");
+  } else if (last) {
+    await refreshList(last.id);
+    loadIntoEditor(last);
+  }
+  els.output.textContent = notices.join("\n");
+  els.output.classList.toggle("error", failed);
 });
 
 // Typing in any field changes the draft. (The editor reports its own changes: see createEditor above.)
