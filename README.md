@@ -282,10 +282,11 @@ extension/
   panel/                     side panel: the form and buttons (panel.js), the code editor (editor.js)
   lib/                       URL matching, storage (scripts, last runs, page.store), run queue and run client, time limit, HTTP requests, packages, the panel's draft, scripts as .py files, how a run ended, when to shut Python down, site access
   vendor/                    Pyodide and the CodeMirror editor (created by `npm run setup`, not in git)
-scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor
+scripts/setup.mjs            fetches Pyodide and bundled packages, bundles the editor, writes their licenses
 scripts/codemirror-entry.mjs the parts of CodeMirror that go into the bundle
 scripts/measure-memory.mjs   measures the extension's memory (`npm run measure`)
 examples/                    sample scripts
+logo/pymonkey-mark.svg       the PyMonkey mark, from which extension/icons/ is made
 docs/screenshots/            pictures of the panel, for this file
 docs/memory.md               how much memory PyMonkey takes, and what is done about it
 tests/                       unit tests + end-to-end test (extension-copy.mjs makes the copy of the extension it loads)
@@ -318,3 +319,5 @@ To report a security problem, see [SECURITY.md](SECURITY.md); please do not open
 ## License
 
 [AGPL-3.0](LICENSE)
+
+The extension ships third-party code under its own licenses. `npm run setup` puts their texts next to it: `extension/vendor/pyodide/LICENSES.txt` (Pyodide, Python and the bundled packages) and `extension/vendor/codemirror/LICENSES.txt` (the code editor).
