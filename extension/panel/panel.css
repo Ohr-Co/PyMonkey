@@ -99,7 +99,6 @@ h1 { margin: 0; font-size: 15px; font-weight: 600; }
 /* ---------- fields and buttons ---------- */
 
 .row { display: flex; align-items: center; gap: 8px; }
-.row select { flex: 1; min-width: 0; } /* the list takes the room the button leaves */
 
 label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 /* A label with its field on the same line. */
@@ -107,7 +106,7 @@ label.inline { flex-direction: row; align-items: center; gap: 6px; }
 .field { display: flex; flex-direction: column; gap: 4px; }
 .spread { justify-content: space-between; }
 
-input[type="text"], input[type="number"], select, button {
+input[type="text"], input[type="number"], button {
   font: inherit;
   font-size: 13px;
   padding: 6px 10px;
@@ -138,12 +137,131 @@ button.primary {
 }
 button.primary:hover { opacity: 0.85; }
 
-/* Lesser actions: words only. The negative margin lines the first one's text
-   up with the fields above and below. */
+/* Lesser actions: words only. */
 button.quiet { padding: 3px 6px; border-color: transparent; color: var(--muted); font-size: 12px; }
 button.quiet:hover { color: var(--ink); }
-.tools { gap: 2px; margin: -4px 0 -4px -6px; }
+
+/* A button that is a small drawing: + and the menu's three bars. */
+button.icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-color: transparent;
+  color: var(--muted);
+}
+button.icon:hover, button.icon[aria-expanded="true"] { color: var(--ink); }
+button.icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+
+/* ---------- tabs ----------
+   One row: the tabs, then + and the menu. Tabs that do not fit scroll
+   sideways inside their strip; + and the menu stay put. */
+.tabbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin: 0 -16px; /* the line runs the width of the panel */
+  padding: 0 12px 0 16px;
+}
+.tabs {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: none; /* scrolled with the wheel or trackpad; the tab in front is scrolled into view */
+}
+.tab {
+  flex: none;
+  border-radius: 4px 4px 0 0;
+  display: flex;
+  align-items: center;
+  max-width: 160px;
+  margin-bottom: -1px; /* over the bar's line, so the tab in front can hide it */
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+}
+.tab:hover { color: var(--ink); background: var(--hover); }
+.tab.active { border-bottom-color: var(--ink); color: var(--ink); }
+.tab button { border: none; border-radius: 4px; background: none; color: inherit; }
+.tab button:hover { background: none; }
+.tab .tab-close:hover { background: var(--selection); }
+.tab button:focus-visible { outline-offset: -2px; }
+.tab-label { min-width: 0; padding: 8px 2px 8px 8px; overflow: hidden; text-overflow: ellipsis; }
+.tab.active .tab-label { font-weight: 600; }
+.tab.failed .tab-label { color: var(--error); }
+/* Close: an ×. A tab with unsaved changes shows a dot there instead, as code
+   editors do, and the × only while the pointer or the keyboard is on it. */
+.tab-close { display: grid; place-items: center; width: 20px; height: 20px; margin-right: 4px; padding: 0; font-size: 14px; line-height: 1; }
+.tab-close::before { content: "×"; }
+.tab:not(:hover, .active) .tab-close:not(:focus-visible)::before { visibility: hidden; }
+.tab.dirty .tab-close:not(:hover, :focus-visible)::before { content: "●"; font-size: 9px; visibility: visible; }
+
+/* ---------- the menu ---------- */
+.menu { position: relative; flex: none; }
+.menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 24px));
+  max-height: 70vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--control);
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
+}
+.menu-list button { display: block; width: 100%; padding: 6px 10px; border: none; text-align: left; }
+.menu-list button:focus-visible { outline-offset: -2px; }
+.menu-heading {
+  margin: 4px 0 0;
+  padding: 8px 10px 4px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+/* A saved script: its name, and under it what it runs on. */
+#script-list button { white-space: normal; }
+#script-list .detail { display: block; font-size: 11px; color: var(--muted); word-break: break-all; }
+#script-list [aria-current="true"] { font-weight: 600; }
+#script-list .detail, #script-list .empty { font-weight: 400; }
+#script-list .empty { margin: 0; padding: 4px 10px 6px; font-size: 12px; color: var(--muted); }
+
+/* ---------- what the script runs on, and the run settings ---------- */
+.info { display: flex; align-items: baseline; gap: 8px; margin-top: -4px; }
+button.link {
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+button.link:hover { background: none; color: var(--ink); text-decoration: underline; }
 .save-state { margin-left: auto; font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.settings h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.settings .spread button { margin-right: -6px; }
 
 /* The keyboard shortcut on a button. Left out when the panel is narrow; the
    button's tooltip has it too. */

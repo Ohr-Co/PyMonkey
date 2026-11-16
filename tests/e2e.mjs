@@ -555,6 +555,32 @@ print("not interrupted")`);
   const visible = (id) => panel.$eval(`#${id}`, (el) => !el.hidden);
   // The output pane's own state: running, done, stopped or error.
   const outputState = () => panel.$eval("#output", (el) => el.dataset.state);
+  // The tabs, the menu (≡) and the run settings.
+  const tabNames = () => panel.$$eval("#tabs [role=tab]", (tabs) => tabs.map((tab) => tab.textContent));
+  const activeTabName = () => panel.$eval("#tabs [aria-selected=true]", (tab) => tab.textContent);
+  const clickTab = async (name) => {
+    for (const tab of await panel.$$("#tabs [role=tab]")) {
+      if ((await tab.evaluate((el) => el.textContent)) === name) return tab.click();
+    }
+    throw new Error(`no tab named ${name}`);
+  };
+  const closeActiveTab = () => panel.click("#tabs .tab.active .tab-close");
+  const chooseFromMenu = async (selector) => {
+    await panel.click("#menu");
+    await panel.click(selector);
+  };
+  const openSettings = async () => {
+    if (await panel.$eval("#settings", (el) => el.hidden)) await chooseFromMenu("#menu-settings");
+  };
+  // The saved scripts, as the menu lists them; and opening one of them.
+  const listed = () => panel.$$eval("#script-list .name", (names) => names.map((el) => el.textContent));
+  const openScript = (id) => chooseFromMenu(`#script-list [data-id="${id}"]`);
+  const deleteScriptInFront = () => chooseFromMenu("#delete");
+  const noScriptsListed = () =>
+    panel.waitForFunction(() => document.querySelectorAll("#script-list [data-id]").length === 0, { timeout: 5_000 });
+  const saved = () => panel.waitForFunction(() => document.getElementById("save-state").textContent === "Saved", { timeout: 5_000 });
+  const scriptIdNamed = (name) =>
+    panel.evaluate(async (name) => (await chrome.storage.local.get("scripts")).scripts.find((s) => s.name === name).id, name);
 
   //    The panel runs on "the active tab", which in this test is the panel
   //    itself: an extension page, where scripts are not allowed.
@@ -592,7 +618,7 @@ print("not interrupted")`);
   assert.match(shown.text, /Save this script, then run it again/);
   assert.equal(shown.isError, true);
   await panel.click("#save");
-  await panel.waitForFunction(() => document.getElementById("script-list").value !== "", { timeout: 5_000 });
+  await saved();
   await pressRun();
   assert.deepEqual(await panelOutput(), { text: "run 1\n", isError: false });
   await pressRun();
@@ -602,8 +628,8 @@ print("not interrupted")`);
   const storeKeys = () =>
     panel.evaluate(async () => Object.keys(await chrome.storage.local.get(null)).filter((k) => k.startsWith("store:")));
   assert.equal((await storeKeys()).length, 2);
-  await panel.click("#delete");
-  await panel.waitForFunction(() => document.getElementById("script-list").options.length === 1, { timeout: 5_000 });
+  await deleteScriptInFront();
+  await noScriptsListed();
   assert.deepEqual(await storeKeys(), ["store:store-a"]);
   console.log("ok  panel: page.store needs a saved script, counts its runs, is deleted with it");
 
@@ -648,7 +674,7 @@ print("not interrupted")`);
   // 8b. The code editor.
   const panelUrl = `chrome-extension://${extensionId}/panel/panel.html`;
   // The panel is ready once it has read the saved scripts and filled its fields.
-  const panelReady = () => panel.waitForSelector("#script-list option", { timeout: 5_000 });
+  const panelReady = () => panel.waitForSelector("#tabs [role=tab]", { timeout: 5_000 });
   const closeAndReopenPanel = async () => {
     await panel.close();
     panel = await browser.newPage();
@@ -778,13 +804,14 @@ print("not interrupted")`);
 
   //     Unsaved work survives closing the panel. First a script that was never saved...
   await setEditorText(`print("never saved")`);
+  await openSettings();
   await panel.type("#name", "Draft");
   await panel.type("#match", "https://example.com/*");
   await panel.click("#enabled");
   await closeAndReopenPanel();
   const fields = () =>
     panel.evaluate(() => ({
-      selected: document.getElementById("script-list").selectedOptions[0].textContent,
+      selected: document.querySelector("#tabs [aria-selected=true]").textContent,
       name: document.getElementById("name").value,
       match: document.getElementById("match").value,
       enabled: document.getElementById("enabled").checked,
@@ -792,12 +819,12 @@ print("not interrupted")`);
     }));
   assert.equal(await editorText(), `print("never saved")`);
   assert.deepEqual(await fields(), {
-    selected: "(unsaved script)", name: "Draft", match: "https://example.com/*", enabled: false, timeout: "0",
+    selected: "Draft", name: "Draft", match: "https://example.com/*", enabled: false, timeout: "0",
   });
   //     ...then a saved script with a change that was not saved: the change
   //     comes back in the panel, and the saved script is still the old one.
   await panel.click("#save");
-  await panel.waitForFunction(() => document.getElementById("script-list").value !== "", { timeout: 5_000 });
+  await saved();
   await panel.click("#code .cm-content");
   await selectAll();
   await panel.keyboard.type(`print("changed, not saved")`);
@@ -814,7 +841,7 @@ print("not interrupted")`);
   await pressWith(process.platform === "darwin" ? "Meta" : "Control", "z");
   assert.match(await editorText(), /^# `page` is the page you are looking at/);
   //     A script without changes is shown as it is saved now, not as it was when the panel closed.
-  await panel.select("#script-list", await panel.$eval("#script-list option:nth-child(2)", (o) => o.value));
+  await openScript(await scriptIdNamed("Draft"));
   await panel.waitForFunction(() => document.getElementById("name").value === "Draft");
   await panel.evaluate(async () => {
     const { scripts } = await chrome.storage.local.get("scripts");
@@ -822,23 +849,87 @@ print("not interrupted")`);
   });
   await closeAndReopenPanel();
   assert.equal(await editorText(), `print("changed elsewhere")`);
-  await panel.click("#delete");
-  await panel.waitForFunction(() => document.getElementById("script-list").options.length === 1, { timeout: 5_000 });
+  await deleteScriptInFront();
+  await noScriptsListed();
   await closeAndReopenPanel();
   assert.match(await editorText(), /^# `page` is the page you are looking at/); // nothing left over from the deleted script
   console.log("ok  editor: unsaved text survives closing and reopening the panel");
+
+  // 8b2. Tabs. Each open script has a tab, and keeps its own unsaved work:
+  //      + opens a new script next to it, and switching tabs loses nothing.
+  const output = () => panel.$eval("#output", (el) => el.textContent);
+  const starter = /^# `page` is the page you are looking at/;
+  assert.deepEqual(await tabNames(), ["Untitled"]);
+  await setEditorText(`print("kept")`);
+  await openSettings();
+  await panel.type("#name", "Kept");
+  await panel.click("#save");
+  await saved();
+  const keptId = await scriptIdNamed("Kept");
+  await panel.click("#code .cm-content");
+  await selectAll();
+  await panel.keyboard.type(`print("kept, then changed")`);
+  assert.equal(await panel.$eval("#tabs .tab.active", (el) => el.classList.contains("dirty")), true); // the dot on the tab
+  await panel.click("#new");
+  assert.deepEqual([await tabNames(), await activeTabName()], [["Kept", "Untitled"], "Untitled"]);
+  assert.match(await editorText(), starter);
+  assert.equal(await panel.$eval("#name", (el) => el.value), "");
+  await panel.click("#code .cm-content");
+  await panel.keyboard.type("# typed into a new script");
+  await clickTab("Kept");
+  assert.equal(await editorText(), `print("kept, then changed")`);
+  assert.equal(await panel.$eval("#name", (el) => el.value), "Kept");
+  await clickTab("Untitled");
+  assert.match(await editorText(), /# typed into a new script/);
+  //      The arrow keys go from tab to tab.
+  await panel.focus("#tabs [aria-selected=true]");
+  await panel.keyboard.press("ArrowLeft");
+  assert.equal(await activeTabName(), "Kept");
+  //      The tabs, and what is in them, are still there when the panel is opened again.
+  await closeAndReopenPanel();
+  assert.deepEqual([await tabNames(), await activeTabName()], [["Kept", "Untitled"], "Kept"]);
+  assert.equal(await editorText(), `print("kept, then changed")`);
+  //      A script that is open already comes to the front instead of opening twice.
+  await clickTab("Untitled");
+  await openScript(keptId);
+  assert.deepEqual([await tabNames(), await activeTabName()], [["Kept", "Untitled"], "Kept"]);
+  //      Closing a tab with unsaved work: the first time the panel says what
+  //      would be lost, the second time it goes ahead.
+  await closeActiveTab();
+  assert.deepEqual(await tabNames(), ["Kept", "Untitled"]);
+  assert.match(await output(), /^Kept is not saved\. Save it first, or close it again to drop it\.$/);
+  await closeActiveTab();
+  assert.deepEqual([await tabNames(), await activeTabName()], [["Untitled"], "Untitled"]);
+  //      Opened again, the script is as it was saved.
+  await openScript(keptId);
+  assert.equal(await editorText(), `print("kept")`);
+  //      Nothing unsaved: no question. Closing the last tab opens a new script.
+  await closeActiveTab();
+  assert.deepEqual(await tabNames(), ["Untitled"]);
+  await closeActiveTab();
+  await closeActiveTab();
+  assert.deepEqual(await tabNames(), ["Untitled"]);
+  assert.match(await editorText(), starter);
+  //      Delete takes the script, and its tab, away.
+  await openScript(keptId);
+  await deleteScriptInFront();
+  await noScriptsListed();
+  assert.deepEqual(await tabNames(), ["Untitled"]);
+  console.log("ok  tabs: each keeps its own unsaved work, survives reopening, and asks before dropping it");
 
   // 8c. Scripts as .py files. Export saves the script in the fields, with a
   //     header comment that holds its name, match pattern and time limit.
   const storedScripts = () =>
     panel.evaluate(async () => (await chrome.storage.local.get("scripts")).scripts.map(({ id, ...rest }) => rest));
   const outputText = () => panel.$eval("#output", (el) => el.textContent);
+  const saveState = () => panel.$eval("#save-state", (el) => el.textContent);
+  await openSettings();
   await panel.type("#name", "Shop: prices");
   await panel.type("#match", "https://example.com/shop/*");
   await panel.$eval("#timeout", (el) => el.select()); // select what is there, so that typing replaces it
   await panel.type("#timeout", "45");
   await setEditorText(`print("exported")\n`);
-  await panel.click("#export");
+  await chooseFromMenu("#export");
   const exported = await downloadedFile("Shop- prices.py"); // a file name cannot hold a colon
   assert.equal(
     exported,
@@ -875,15 +966,16 @@ print("not interrupted")`);
   assert.match(notices[0], /^Imported "Shop: prices" from Shop- prices\.py\. It is switched off\./);
   assert.equal(notices[1], `Imported "plain script" from plain script.py. It runs only when you press Run.`);
   assert.equal(notices[2], "Could not import picture.py: it is not a text file.");
-  //     The fields held a script that was not saved, so they were left alone.
-  assert.match(notices[3], /^The editor still shows what you were working on/);
+  assert.equal(notices.length, 3);
+  assert.deepEqual(await listed(), ["Shop: prices", "plain script"]);
+  //     Each imported script opened in a tab, ready to be read. The script
+  //     that was being edited, not saved, is still in its own tab.
+  assert.deepEqual([await tabNames(), await activeTabName()], [["Shop: prices", "Shop: prices", "plain script"], "plain script"]);
+  assert.equal(await editorText(), `print("plain")\n`);
+  await panel.click("#tabs .tab:first-child .tab-label");
   assert.equal(await editorText(), `print("exported")\n`);
-  assert.deepEqual(await panel.$$eval("#script-list option", (options) => options.map((o) => o.textContent)), [
-    "(unsaved script)", "Shop: prices", "plain script",
-  ]);
-  assert.equal((await fields()).selected, "(unsaved script)");
-  //     With nothing to lose, the imported script is shown, ready to be read.
-  await panel.click("#new");
+  assert.equal(await saveState(), "Not saved");
+  //     One more import: in front, with its fields from the header.
   await chooseFiles(join(downloadPath, "Shop- prices.py"));
   await panel.waitForFunction(() => document.getElementById("name").value === "Shop: prices", { timeout: 5_000 });
   assert.equal(await editorText(), `print("exported")\n`);
@@ -903,7 +995,6 @@ print("not interrupted")`);
     chrome.tabs.query = async () => [tab]; // "the active tab" is the test page again
   }, pageUrl);
   const clearOutput = () => panel.$eval("#output", (el) => (el.textContent = ""));
-  const saveState = () => panel.$eval("#save-state", (el) => el.textContent);
   assert.equal(await saveState(), ""); // a new script that nobody typed in
   await setEditorText(`print("by keyboard")`);
   assert.equal(await saveState(), "Not saved");
@@ -914,13 +1005,14 @@ print("not interrupted")`);
   assert.deepEqual(await panelOutput(), { text: "by keyboard\n", isError: false });
   assert.equal(await editorText(), `print("by keyboard")`);
   //     From a field, with the other key.
+  await openSettings();
   await panel.type("#name", "Keys");
   await clearOutput();
   await pressWith("Meta", "Enter");
   assert.deepEqual(await panelOutput(), { text: "by keyboard\n", isError: false });
   await pressWith("Meta", "s");
-  await panel.waitForFunction(() => document.getElementById("script-list").selectedOptions[0].textContent === "Keys", { timeout: 5_000 });
-  assert.equal(await saveState(), "Saved");
+  await saved();
+  assert.equal(await activeTabName(), "Keys");
   //     A change made after saving is pointed out, until it is saved too.
   await panel.click("#code .cm-content");
   await selectAll();
@@ -944,8 +1036,9 @@ print("not interrupted")`);
   console.log("ok  keyboard: the focus goes from Run to Stop and back");
 
   //     Looks. At 320 px, the narrowest the panel is made for, nothing sticks
-  //     out and the panel does not scroll sideways. (With the longest note on
-  //     whether the script is saved, which shares a line with three buttons.)
+  //     out and the panel does not scroll sideways. (With the run settings
+  //     open, and the longest note on whether the script is saved.) Tabs that
+  //     do not fit scroll inside their strip, so only the strip has to fit.
   //     And with the three notices about site access showing (see 8e), each
   //     with an address in it, which is one long word.
   const showNotices = () =>
@@ -962,7 +1055,8 @@ print("not interrupted")`);
   const misfits = await panel.evaluate(() => {
     const found = [];
     if (document.documentElement.scrollWidth > innerWidth) found.push("the panel scrolls sideways");
-    for (const el of document.querySelectorAll("h1, #status, #save-state, button, input, select, label, #code, pre, .notice")) {
+    for (const el of document.querySelectorAll("h1, #status, #tabs, #rules, #save-state, button, input, label, #code, pre, .notice")) {
+      if (el.closest(".tab")) continue; // inside the strip of tabs
       const box = el.getBoundingClientRect();
       if (box.width === 0) continue; // not shown
       if (box.left < 0 || box.right > innerWidth) found.push(`${el.id || el.textContent.trim()} sticks out`);
@@ -987,19 +1081,25 @@ print("not interrupted")`);
     { what: "label Run automatically on", selector: "label[for=match]" },
     { what: "label Enabled", selector: "label:has(#enabled)" },
     { what: "label Time limit", selector: "label:has(#timeout)" },
-    { what: "list of scripts", selector: "#script-list" },
+    { what: "tab in front", selector: "#tabs .tab.active .tab-label" },
+    { what: "tab behind", selector: "#tabs .tab:not(.active) .tab-label" },
+    { what: "what it runs on", selector: "#rules" },
+    { what: "heading Run settings", selector: "#settings h2" },
+    { what: "script in the menu", selector: "#script-list .name" },
+    { what: "what a script in the menu runs on", selector: "#script-list .detail" },
+    { what: "heading in the menu", selector: ".menu-heading" },
     { what: "name", selector: "#name" },
     { what: "example in an empty Name", selector: "#name", part: "::placeholder" },
     { what: "example in an empty pattern", selector: "#match", part: "::placeholder" },
     { what: "time limit", selector: "#timeout" },
-    ...["new", "import", "export", "delete", "run", "stop", "save"].map((id) => ({ what: `button ${id}`, selector: `#${id}` })),
+    ...["new", "menu", "menu-settings", "import", "export", "delete", "settings-done", "run", "stop", "save"].map((id) => ({ what: `button ${id}`, selector: `#${id}` })),
     { what: "shortcut on Run", selector: "#run kbd" },
     { what: "shortcut on Save", selector: "#save kbd" },
     { what: "saved or not", selector: "#save-state" },
     ...["match-access", "tab-access", "fetch-access"].map((id) => ({ what: `notice ${id}`, selector: `#${id} span` })),
     { what: "button Allow", selector: "#match-access button" },
   ];
-  const outlined = ["#script-list", "#new", "#name", "#match", "#timeout", "#code", "#save", "#match-access button"];
+  const outlined = ["#menu-list", "#name", "#match", "#timeout", "#code", "#save", "#match-access button"];
   //     The checks in 8 saw real runs put the panel in each of its states.
   //     Here each state is put on by hand, to look at its colors.
   const dressAs = async (state) => {
@@ -1048,7 +1148,7 @@ print("not interrupted")`);
     await panel.focus("#name");
     await pressWith("Shift", "Tab"); // one step back: the button before the Name field
     let ring = await focusRing();
-    assert.deepEqual({ on: ring.on, style: ring.style }, { on: "delete", style: "solid" });
+    assert.deepEqual({ on: ring.on, style: ring.style }, { on: "settings-done", style: "solid" });
     assert.ok(ring.width >= 2 && contrast({ color: ring.color, background: name.around }) >= 3, `${scheme} mode: ring ${ring.color}`);
     await panel.click("#code .cm-content");
     ring = await focusRing();
@@ -1083,8 +1183,6 @@ print("not interrupted")`);
   const notice = (id) => panel.$eval(`#${id}`, (el) => (el.hidden ? null : el.querySelector("span").textContent));
   const noticeIs = (id, shown) =>
     panel.waitForFunction((id, shown) => document.getElementById(id).hidden !== shown, { timeout: 5_000 }, id, shown);
-  const listed = () => panel.$$eval("#script-list option", (options) => options.map((o) => o.textContent));
-  const saved = () => panel.waitForFunction(() => document.getElementById("save-state").textContent === "Saved", { timeout: 5_000 });
   const tabIds = () => panel.evaluate(async () => (await chrome.tabs.query({})).map((tab) => tab.id));
   //     Make `tabId` the panel's "active tab".
   const pointPanelAt = (tabId) =>
@@ -1125,6 +1223,7 @@ print("not interrupted")`);
   //     this goes through the real request.
   const marker = `page.set_attr("body", "data-site-access", "ran")`;
   await panel.click("#new");
+  await openSettings();
   await panel.type("#name", "Allowed");
   await panel.type("#match", pageUrl + "*");
   await setEditorText(marker);
@@ -1145,6 +1244,7 @@ print("not interrupted")`);
   });
   const asked = () => panel.evaluate(() => window.__asked);
   await panel.click("#new");
+  await openSettings();
   await panel.type("#name", "Blocked");
   //     The notice is there as soon as the pattern is: before saving, and without asking.
   await panel.type("#match", blockedUrl + "*");
@@ -1274,16 +1374,21 @@ print("not interrupted")`);
   await badgeIs("1");
   assert.match(await panel2.evaluate(() => chrome.action.getTitle({})), /1 script failed/);
   //     ...the list in the panel says which script it was...
-  const names = await panel2.$$eval("#script-list option", (options) => options.map((o) => o.textContent));
-  assert.deepEqual(names, ["(unsaved script)", "stuck (failed)", "auto", "auto 2", "chatty"]);
+  const names = await panel2.$$eval("#script-list .name", (names) => names.map((el) => el.textContent));
+  assert.deepEqual(names, ["stuck (failed)", "auto", "auto 2", "chatty"]);
   assert.equal(await panel2.$eval("#last-run", (el) => el.hidden), true); // nothing selected yet
   //     ...and selecting it shows the run. Having been seen, it leaves the badge.
+  const openInPanel2 = async (scriptId) => {
+    await panel2.click("#menu");
+    await panel2.click(`#script-list [data-id="${scriptId}"]`);
+  };
   const lastRunShown = async (scriptId) => {
-    await panel2.select("#script-list", scriptId);
+    const name = await panel2.$eval(`#script-list [data-id="${scriptId}"] .name`, (el) => el.textContent.replace(" (failed)", ""));
+    await openInPanel2(scriptId);
     await panel2.waitForFunction(
       (name) => document.getElementById("name").value === name && !document.getElementById("last-run").hidden,
       { timeout: 5_000 },
-      await panel2.$eval(`#script-list option[value=${scriptId}]`, (o) => o.textContent.replace(" (failed)", "")),
+      name,
     );
     return panel2.evaluate(() => ({
       summary: document.getElementById("last-run-summary").textContent,
@@ -1307,7 +1412,7 @@ print("not interrupted")`);
   //     A new failure brings the badge back; deleting the script removes its last run.
   await page.reload();
   await badgeIs("1");
-  await panel2.select("#script-list", "t1");
+  await openInPanel2("t1");
   await panel2.waitForFunction(() => document.getElementById("name").value === "auto");
   await badgeIs("1"); // looking at another script does not clear it
   //     An automatic run uses its script's page.store: "auto" has now counted two page loads.
@@ -1413,12 +1518,13 @@ print("not interrupted")`);
       //   it is marked in the list, and does not start. (Chrome's question to
       //   the user gets a stand-in again, which says no.)
       await panel.evaluate(() => (chrome.permissions.request = async () => false));
+      await openSettings();
       await panel.type("#name", "Auto");
       await panel.type("#match", pageUrl + "*");
       await setEditorText(`page.set_attr("body", "data-site-access", "ran")`);
       await panel.click("#save");
       await saved();
-      assert.deepEqual(await listed(), ["(unsaved script)", "Auto (no access)"]);
+      assert.deepEqual(await listed(), ["Auto (no access)"]);
       await tab.reload(); // the same site: the tab stays allowed
       await panel.click("#new");
       await pressRun(`print("by hand")`);

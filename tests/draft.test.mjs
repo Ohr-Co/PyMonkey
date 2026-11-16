@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formToRestore, hasChanges, loadDraft, saveDraft, scriptFields } from "../extension/lib/draft.js";
+import { formToRestore, hasChanges, loadTabs, saveTabs, scriptFields, tabsToRestore } from "../extension/lib/draft.js";
 
 // A stand-in for the browser's localStorage, which Node does not have.
 const fakeStorage = () => {
@@ -43,27 +43,82 @@ test("a script saved before it had a time limit counts as having the default", (
   assert.equal(hasChanges(form({ timeout: "5" }), old), true);
 });
 
-test("a draft is read back as it was stored, with whether it had changes", () => {
+test("open tabs are read back as they were stored, each with whether it had changes", () => {
   const storage = fakeStorage();
-  assert.equal(loadDraft(storage), null); // nothing stored yet
-  saveDraft(form({ code: "print(2)\n" }), saved, storage);
-  assert.deepEqual(loadDraft(storage), { ...form({ code: "print(2)\n" }), changed: true });
-  saveDraft(form(), saved, storage);
-  assert.deepEqual(loadDraft(storage), { ...form(), changed: false });
+  assert.equal(loadTabs(storage), null); // nothing stored yet
+  const tabs = [{ ...form({ code: "print(2)\n" }), key: "a" }, { ...form(), key: "b" }, { ...form({ id: null }), key: "c" }];
+  saveTabs({ active: "b", tabs }, [saved], storage);
+  assert.deepEqual(loadTabs(storage), {
+    active: "b",
+    tabs: [{ ...tabs[0], changed: true }, { ...tabs[1], changed: false }, { ...tabs[2], changed: true }],
+  });
 });
 
-test("a draft that cannot be read counts as no draft", () => {
+test("the one draft of a panel from before tabs becomes a tab", () => {
   const storage = fakeStorage();
-  storage.setItem("draft", "{not json");
-  assert.equal(loadDraft(storage), null);
-  storage.setItem("draft", JSON.stringify({ name: "no code" }));
-  assert.equal(loadDraft(storage), null);
+  storage.setItem("draft", JSON.stringify({ ...form(), changed: true }));
+  assert.deepEqual(loadTabs(storage), { active: "restored", tabs: [{ ...form(), changed: true, key: "restored" }] });
+});
+
+test("tabs that cannot be read count as none", () => {
+  const storage = fakeStorage();
+  storage.setItem("tabs", "{not json");
+  assert.equal(loadTabs(storage), null);
+  storage.setItem("tabs", JSON.stringify({ active: "a", tabs: [{ key: "a", name: "no code" }, { code: "no key" }] }));
+  assert.equal(loadTabs(storage), null);
 });
 
 test("storage that refuses to store does not break the panel", () => {
   const full = { setItem() { throw new Error("QuotaExceededError"); }, getItem() { throw new Error("SecurityError"); } };
-  saveDraft(form(), saved, full); // does not throw
-  assert.equal(loadDraft(full), null);
+  saveTabs({ active: "a", tabs: [{ ...form(), key: "a" }] }, [saved], full); // does not throw
+  assert.equal(loadTabs(full), null);
+});
+
+test("restoring tabs: each comes back as it was left, the one in front stays in front", () => {
+  const other = { ...saved, id: "s2", name: "Other" };
+  const restored = tabsToRestore(
+    {
+      active: "b",
+      tabs: [
+        { ...form({ code: "print(2)\n" }), key: "a", changed: true },
+        { ...form({ id: "s2", name: "Other" }), key: "b", changed: false },
+        { ...form({ id: null, code: "x = 1" }), key: "c", changed: true },
+      ],
+    },
+    [saved, { ...other, code: "print('newer')\n" }],
+  );
+  assert.deepEqual(restored, {
+    active: "b",
+    tabs: [
+      { ...form({ code: "print(2)\n" }), key: "a" },
+      { ...other, code: "print('newer')\n", key: "b" }, // no changes: as it is saved now
+      { ...form({ id: null, code: "x = 1" }), key: "c" },
+    ],
+  });
+});
+
+test("restoring tabs: a deleted script's tab stays only if it had changes", () => {
+  const restored = tabsToRestore(
+    {
+      active: "a",
+      tabs: [
+        { ...form(), key: "a", changed: false },
+        { ...form({ code: "print(2)\n" }), key: "b", changed: true },
+      ],
+    },
+    [],
+  );
+  // The tab in front is gone: the first one left comes to the front.
+  assert.deepEqual(restored, { active: "b", tabs: [{ ...form({ id: null, code: "print(2)\n" }), key: "b" }] });
+});
+
+test("restoring tabs: nothing stored, or a script open twice", () => {
+  assert.deepEqual(tabsToRestore(null, [saved]), { active: null, tabs: [] });
+  const twice = tabsToRestore(
+    { active: "b", tabs: [{ ...form(), key: "a", changed: false }, { ...form(), key: "b", changed: false }] },
+    [saved],
+  );
+  assert.deepEqual(twice, { active: "a", tabs: [{ ...saved, key: "a" }] });
 });
 
 test("no draft: the panel opens with a new script", () => {

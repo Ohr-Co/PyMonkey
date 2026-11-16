@@ -38,48 +38,79 @@
       <span id="status" class="status" role="status" data-state="loading">Loading Python…</span>
     </header>
 
-    <div class="row">
-      <select id="script-list" aria-label="Saved scripts"></select>
-      <button id="new">New</button>
+    <!-- The open scripts, one tab each, as in a code editor. panel.js makes
+         the tabs: each is a button with role="tab" to show it, and a button
+         to close it. + opens a new script; the menu (≡) holds everything else. -->
+    <div class="tabbar">
+      <div id="tabs" class="tabs" role="tablist" aria-label="Open scripts"></div>
+      <button id="new" class="icon" aria-label="New script" title="New script">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+      </button>
+      <div class="menu">
+        <button id="menu" class="icon" aria-label="Menu" title="Menu" aria-haspopup="menu" aria-expanded="false" aria-controls="menu-list">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11" /></svg>
+        </button>
+        <!-- The menu. What the panel can do besides editing and running goes
+             here, so that the editor keeps the room as features are added.
+             The file input is the browser's "choose a file" dialog; it is
+             hidden, and Import opens it. -->
+        <div id="menu-list" class="menu-list" role="menu" aria-label="Menu" hidden>
+          <button id="menu-settings" role="menuitem">Run settings…</button>
+          <button id="import" role="menuitem">Import…</button>
+          <button id="export" role="menuitem">Export</button>
+          <button id="delete" role="menuitem">Delete script</button>
+          <div class="menu-heading" aria-hidden="true">All scripts</div>
+          <!-- Every saved script, and what it runs on. Picking one opens it in a tab. -->
+          <div id="script-list" role="group" aria-label="All scripts"></div>
+        </div>
+        <input id="import-file" type="file" accept=".py,text/x-python,text/plain" multiple hidden />
+      </div>
     </div>
 
-    <!-- What can be done with the script as a whole. The file input is the
-         browser's "choose a file" dialog; it is hidden, and Import opens it. -->
-    <div class="row tools">
-      <button id="import" class="quiet">Import…</button>
-      <button id="export" class="quiet">Export</button>
-      <button id="delete" class="quiet">Delete</button>
+    <!-- What the script in front runs on, and whether it is saved. A click on
+         the first opens the run settings. -->
+    <div class="info">
+      <button id="rules" class="link" title="Run settings" aria-controls="settings" aria-expanded="false"></button>
       <span id="save-state" class="save-state"></span>
-      <input id="import-file" type="file" accept=".py,text/x-python,text/plain" multiple hidden />
     </div>
 
-    <!-- The selected script's last automatic run. Hidden until it has one. -->
+    <!-- The run settings of the script in front. Hidden until opened from the
+         menu or from the line above; stays open until closed. -->
+    <section id="settings" class="settings" aria-label="Run settings" hidden>
+      <div class="row spread">
+        <h2>Run settings</h2>
+        <button id="settings-done" class="quiet">Done</button>
+      </div>
+
+      <label>Name <input id="name" type="text" placeholder="My script" /></label>
+
+      <!-- Running automatically: the pages to run on, and a switch for it.
+           (for="match" ties the words to the field, as wrapping it in the label does elsewhere.) -->
+      <div class="field">
+        <div class="row spread">
+          <label for="match">Run automatically on (optional)</label>
+          <label class="inline"><input id="enabled" type="checkbox" checked /> Enabled</label>
+        </div>
+        <input id="match" type="text" placeholder="https://example.com/*" spellcheck="false" />
+      </div>
+
+      <label class="inline">
+        Time limit in seconds (0 = none)
+        <input id="timeout" type="number" min="0" step="1" value="30" />
+      </label>
+    </section>
+
+    <!-- Site access (see lib/site-access.js). This line shows when the script
+         is to run automatically on a site PyMonkey has not been allowed on,
+         whether or not the run settings are open. Its button makes Chrome ask the user. -->
+    <p id="match-access" class="notice" role="status" hidden><span></span><button>Allow</button></p>
+
+    <!-- The script's last automatic run. Hidden until it has one. -->
     <details id="last-run" hidden>
       <summary id="last-run-summary"></summary>
       <p id="last-run-url"></p>
       <pre id="last-run-output" tabindex="0"></pre>
     </details>
-
-    <label>Name <input id="name" type="text" placeholder="My script" /></label>
-
-    <!-- Running automatically: the pages to run on, and a switch for it.
-         (for="match" ties the words to the field, as wrapping it in the label does elsewhere.) -->
-    <div class="field">
-      <div class="row spread">
-        <label for="match">Run automatically on (optional)</label>
-        <label class="inline"><input id="enabled" type="checkbox" checked /> Enabled</label>
-      </div>
-      <input id="match" type="text" placeholder="https://example.com/*" spellcheck="false" />
-      <!-- Site access (see lib/site-access.js). This line shows when the script
-           is to run automatically on a site PyMonkey has not been allowed on.
-           Its button makes Chrome ask the user. -->
-      <p id="match-access" class="notice" role="status" hidden><span></span><button>Allow</button></p>
-    </div>
-
-    <label class="inline">
-      Time limit in seconds (0 = none)
-      <input id="timeout" type="number" min="0" step="1" value="30" />
-    </label>
 
     <!-- The code editor (CodeMirror) is created inside this element: see editor.js. -->
     <div id="code"></div>

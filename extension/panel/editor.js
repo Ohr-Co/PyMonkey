@@ -38,7 +38,7 @@ function tab(view) {
 /**
  * Put an editor inside `parent` (an empty element).
  * `onChange` is called whenever the user changes the text.
- * Returns { getText(), setText(text), focus() }.
+ * Returns { getText(), setText(text), getState(), setState(state), focus() }.
  */
 export function createEditor({ parent, onChange }) {
   const extensions = [
@@ -67,6 +67,10 @@ export function createEditor({ parent, onChange }) {
     // A fresh state, not an edit: another script is being shown, and Undo
     // must not bring the previous one back. (onChange is not called.)
     setText: (text) => view.setState(EditorState.create({ doc: text, extensions })),
+    // The whole state: text, cursor and undo history. The panel keeps one per
+    // open tab, so that switching back to a tab brings back its Undo as well.
+    getState: () => view.state,
+    setState: (state) => view.setState(state),
     focus: () => view.focus(),
   };
 }

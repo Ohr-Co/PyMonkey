@@ -45,7 +45,7 @@ After changing extension code, press the reload icon on the PyMonkey card in `ch
 PyMonkey is installed with access to no site. Chrome shows no warning about your data when you add it, and until you say so PyMonkey cannot read or change any page. There are two ways to say so:
 
 - **For one tab: click the PyMonkey icon in the toolbar.** This opens the panel and allows PyMonkey on the page in that tab, so **Run** works there. It lasts while the tab stays on that site; following links within the site is fine. When the tab goes to another site, or you switch to a tab where you have not clicked the icon, the panel says that PyMonkey has not been allowed there, and one more click on the icon allows it. (The icon opens the panel but does not close it. Close the panel with its own close button.)
-- **For good: save a script that runs automatically.** A script with a URL pattern starts without anybody clicking anything, so its site has to be allowed for good. When you save such a script, Chrome asks whether PyMonkey may read and change your data on that site. It asks once per site. If you say no, the script is saved all the same, but it does not start by itself: the panel's list marks it "(no access)", and a line under the URL pattern says why and has an **Allow** button for when you change your mind.
+- **For good: save a script that runs automatically.** A script with a URL pattern starts without anybody clicking anything, so its site has to be allowed for good. When you save such a script, Chrome asks whether PyMonkey may read and change your data on that site. It asks once per site. If you say no, the script is saved all the same, but it does not start by itself: the list of scripts in the panel's menu marks it "(no access)", and a line above the editor says why and has an **Allow** button for when you change your mind.
 
 Some things to know:
 
@@ -135,25 +135,27 @@ Write, store, fetch and download calls need no `await`. Scripts written for earl
 
 The panel's **editor** colors Python as you type, in light and dark mode. Enter after a line ending in a colon starts the next line one level deeper. Tab indents and Shift+Tab dedents, the selected lines if there are any. Because Tab indents, moving on to the next field with the keyboard takes two keys: Escape, then Tab.
 
-What you type is not lost when the panel closes: the panel reopens with the script you were working on, changes you had not saved included. Saved scripts only change when you press **Save**.
+The panel works like a code editor: each open script has a **tab**, and **+** next to the tabs starts a new one. Switch between tabs with a click or with the arrow keys; each tab keeps its own changes, and its own Undo, while you work in another. A tab with unsaved changes shows a dot where its close button is. Closing such a tab does not drop the changes at once: the panel says what would be lost, and a second click closes it. What is open is not lost when the panel closes either: the panel reopens with the same tabs, changes you had not saved included. Saved scripts only change when you press **Save**.
+
+Everything else is in the menu, **≡**, at the end of the tab bar: **Run settings…** (the script's name, the pages it runs on automatically, and its time limit; a double click on a tab, or a click on the line under the tabs, opens them too), **Import…**, **Export**, **Delete script**, and **All scripts**, the list of saved scripts with what each one runs on. Pick one there to open it in a tab.
 
 `print()` output and tracebacks show up in the panel. While a script runs, the Run button becomes **Stop**, which ends it at once. The line at the top of the panel says what Python is doing: **Loading Python…** when the panel first opens, then **Ready**, **Running…** during a run, and after a run that did not finish **Stopped** (by you or by the time limit) or **Script failed**.
 
 Python takes memory, about 125 MB while it is loaded, so PyMonkey does not keep it around for nothing. When no script has run for five minutes, Python is shut down and the memory goes back to your computer. The next run loads it again by itself, and starts about two seconds later for it. Opening the panel loads it too. The numbers are in [docs/memory.md](docs/memory.md).
 
-From the keyboard, **Ctrl+Enter** runs the script and **Ctrl+S** saves it (**Cmd** instead of Ctrl on a Mac), wherever in the panel you are typing. Under the list of scripts, the panel says whether the script you are looking at is saved: "Not saved", "Unsaved changes" or "Saved". The panel follows your system's light or dark mode.
+From the keyboard, **Ctrl+Enter** runs the script and **Ctrl+S** saves it (**Cmd** instead of Ctrl on a Mac), wherever in the panel you are typing. Under the tabs, the panel says what the script in front runs on, and whether it is saved: "Not saved", "Unsaved changes" or "Saved". The panel follows your system's light or dark mode.
 
-Each script has a **time limit**, 30 seconds unless you change it in the panel. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
+Each script has a **time limit**, 30 seconds unless you change it in the run settings. A script that runs longer is stopped, so a runaway loop cannot hang around forever. Raise the limit for slow work such as a long scrape, or set it to 0 for no limit. The limit is saved with the script and also applies when it runs automatically. A stopped script's output so far is not kept.
 
-To run a script automatically, save it with a URL pattern such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). The first time you save a script for a site, Chrome asks you to allow PyMonkey there (see [Site access](#site-access)). More scripts in [`examples/`](examples).
+To run a script automatically, give it a URL pattern in the run settings, such as `https://example.com/*` ([match pattern syntax](https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns)). The first time you save a script for a site, Chrome asks you to allow PyMonkey there (see [Site access](#site-access)). More scripts in [`examples/`](examples).
 
-Automatic runs happen whether or not the panel is open. PyMonkey keeps each script's **last automatic run**: when it ran, on which URL, whether it succeeded, and what it printed (long output is cut to its last 20,000 characters). Select a script in the panel to see it. When an automatic run fails, the toolbar icon gets a red badge with the number of failed scripts and the script is marked "(failed)" in the panel's list. The badge goes away once you have looked at the failure in the panel, or the script is deleted.
+Automatic runs happen whether or not the panel is open. PyMonkey keeps each script's **last automatic run**: when it ran, on which URL, whether it succeeded, and what it printed (long output is cut to its last 20,000 characters). Open the script in the panel to see it. When an automatic run fails, the toolbar icon gets a red badge with the number of failed scripts, the script is marked "(failed)" in the menu's list of scripts, and its tab's name turns red. The badge goes away once you have looked at the failure in the panel, or the script is deleted.
 
 Scripts can import the Python standard library, BeautifulSoup and a few more packages, and you can add others: see [Packages](#packages).
 
 ## Script files
 
-Scripts live in the browser's storage. To back one up, keep it in git or pass it on, press **Export** in the panel: it saves the script you are looking at as a `.py` file. **Import…** does the reverse, for one file or several at once.
+Scripts live in the browser's storage. To back one up, keep it in git or pass it on, choose **Export** in the panel's menu: it saves the script in front as a `.py` file. **Import…** does the reverse, for one file or several at once; each imported script opens in a tab of its own.
 
 An exported file is the script's code under a header comment:
 

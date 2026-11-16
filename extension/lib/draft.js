@@ -1,4 +1,4 @@
-// The panel's draft: what is in the editing form, kept so that closing the
+// The panel's drafts: what is in each open tab, kept so that closing the
 // side panel (or the browser) does not lose text that was not saved.
 //
 // It is kept in the panel's own `localStorage`, not in chrome.storage like
@@ -9,14 +9,17 @@
 //
 // A "form" is the state of the panel's fields:
 //   { id, name, match, enabled, timeout, code }     id is null for a script that was never saved
-// The stored draft is a form plus `changed`: whether it differs from the saved script.
+// A tab is a form plus `key`, which tells the tab apart even before its script has an id.
+// What is stored is { active, tabs }: the key of the tab in front, and every
+// tab with `changed`: whether it differs from its saved script.
 //
 // No chrome.* calls here, so it can be tested with plain Node (the tests pass
 // their own stand-in for localStorage).
 
 import { timeoutSeconds } from "./timeout.js";
 
-const KEY = "draft";
+const KEY = "tabs";
+const OLD_KEY = "draft"; // before tabs: the one form the panel had
 
 /** The fields of a form as they are saved: the name and pattern tidied up. */
 export function scriptFields(form) {
@@ -38,20 +41,30 @@ export function hasChanges(form, script) {
   return Object.keys(fields).some((key) => fields[key] !== saved[key]);
 }
 
-/** Remember the form. `script` is the saved script it belongs to, if any. */
-export function saveDraft(form, script, storage = localStorage) {
+/**
+ * Remember the open tabs. `active` is the key of the tab in front, `scripts`
+ * the saved scripts, to tell which tabs have changes.
+ */
+export function saveTabs({ active, tabs }, scripts, storage = localStorage) {
+  const stored = tabs.map((tab) => ({ ...tab, changed: hasChanges(tab, scripts.find((s) => s.id === tab.id)) }));
   try {
-    storage.setItem(KEY, JSON.stringify({ ...form, changed: hasChanges(form, script) }));
+    storage.setItem(KEY, JSON.stringify({ active, tabs: stored }));
   } catch {
-    // Storage full or switched off: the draft is a convenience, not worth an error.
+    // Storage full or switched off: the drafts are a convenience, not worth an error.
   }
 }
 
-/** The remembered draft, or null if there is none (or it cannot be read). */
-export function loadDraft(storage = localStorage) {
+/** The remembered tabs, or null if there are none (or they cannot be read). */
+export function loadTabs(storage = localStorage) {
   try {
-    const draft = JSON.parse(storage.getItem(KEY));
-    return typeof draft?.code === "string" ? draft : null;
+    const saved = JSON.parse(storage.getItem(KEY));
+    if (Array.isArray(saved?.tabs)) {
+      const tabs = saved.tabs.filter((tab) => typeof tab?.code === "string" && typeof tab.key === "string");
+      return tabs.length ? { active: saved.active, tabs } : null;
+    }
+    // A panel from before tabs left one draft: it becomes the one tab.
+    const draft = JSON.parse(storage.getItem(OLD_KEY));
+    return typeof draft?.code === "string" ? { active: "restored", tabs: [{ ...draft, key: "restored" }] } : null;
   } catch {
     return null;
   }
@@ -71,4 +84,22 @@ export function formToRestore(draft, scripts) {
   if (!script) return { ...form, id: null };
   // Without changes of its own, show the script as it is saved now.
   return changed ? form : script;
+}
+
+/**
+ * The tabs to open the panel with: { active, tabs }, with no tabs if there is
+ * nothing to restore. Each tab comes back as formToRestore says, except one
+ * whose script was deleted without it having changes of its own: with nothing
+ * of its own to keep, it is left closed. A script open in two tabs gets one.
+ */
+export function tabsToRestore(saved, scripts) {
+  const tabs = [];
+  for (const { key, ...draft } of saved?.tabs ?? []) {
+    if (draft.id != null && !draft.changed && !scripts.some((s) => s.id === draft.id)) continue;
+    const form = formToRestore(draft, scripts);
+    if (form.id != null && tabs.some((tab) => tab.id === form.id)) continue;
+    tabs.push({ ...form, key });
+  }
+  const active = tabs.some((tab) => tab.key === saved?.active) ? saved.active : (tabs[0]?.key ?? null);
+  return { active, tabs };
 }
